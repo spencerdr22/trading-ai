@@ -1,0 +1,26 @@
+default:
+  symbol: MES
+  model:
+    window: 30
+    features:
+      ema_short: 12
+      ema_long: 26
+      rsi: 14
+      atr: 14
+    use_pytorch: false
+  risk:
+    stop_loss_ticks: 8
+    take_profit_ticks: 12
+    tick_value: 5.0
+    contract_cost: 1.25
+    max_contracts: 4
+    risk_per_trade_pct: 0.01
+    max_drawdown_pct: 0.2
+    daily_loss_limit: 0.05
+  training:
+    epochs: 5
+    batch_size: 256
+  simulator:
+    volatility: 0.0008
+    seed: 42
+    fast_bar_seconds: 0.5
