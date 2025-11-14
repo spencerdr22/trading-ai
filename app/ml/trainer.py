@@ -1,8 +1,10 @@
 # File: app/ml/trainer.py
 import os
+import json
 import joblib
 import pandas as pd
 import numpy as np
+from datetime import datetime
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import accuracy_score
@@ -12,12 +14,30 @@ from .features import make_features
 logger = get_logger(__name__)
 
 class Trainer:
+    """
+    Handles feature generation, model training, evaluation, and persistence
+    for the Trading-AI System.
+    """
+
     def __init__(self, model_path: str = "data/models/model.pkl"):
         self.model_path = model_path
         self.model = None
+        self.meta_path = os.path.splitext(model_path)[0] + "_meta.json"
 
-    def train(self, df: pd.DataFrame):
-        """Train a RandomForest model on market data with feature engineering."""
+    def train(self, df: pd.DataFrame) -> RandomForestClassifier | None:
+        """
+        Train a RandomForest model on OHLCV market data.
+
+        Parameters
+        ----------
+        df : pd.DataFrame
+            Raw OHLCV dataset with at least columns: ['timestamp', 'open', 'high', 'low', 'close', 'volume']
+
+        Returns
+        -------
+        RandomForestClassifier | None
+            Trained model instance or None if training failed.
+        """
         if df is None or df.empty:
             logger.error("Trainer: received empty DataFrame.")
             return None
@@ -32,12 +52,11 @@ class Trainer:
             logger.error("No feature data available for training.")
             return None
 
-        # === Ensure 'close' column exists ===
         if "close" not in feat_df.columns:
             logger.error("Trainer: missing 'close' column in feature data.")
             return None
 
-        # === Create target ===
+        # === Target Creation ===
         feat_df["future_return"] = feat_df["close"].pct_change().shift(-1)
         feat_df["target"] = (feat_df["future_return"] > 0).astype(int)
         feat_df = feat_df.dropna()
@@ -46,8 +65,11 @@ class Trainer:
             logger.warning(f"Trainer: only {len(feat_df)} rows after target generation — not enough for training.")
             return None
 
-        # === Feature selection ===
-        feature_cols = [c for c in feat_df.columns if c not in ("timestamp", "target", "future_return", "open", "high", "low", "close", "volume")]
+        # === Feature Selection ===
+        feature_cols = [
+            c for c in feat_df.columns
+            if c not in ("timestamp", "target", "future_return", "open", "high", "low", "close", "volume")
+        ]
         if not feature_cols:
             logger.error("Trainer: no usable feature columns found.")
             return None
@@ -55,31 +77,83 @@ class Trainer:
         X = feat_df[feature_cols]
         y = feat_df["target"]
 
-        # === Split train/test ===
-        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, shuffle=False)
+        # === Train/Test Split ===
+        X_train, X_test, y_train, y_test = train_test_split(
+            X, y, test_size=0.2, shuffle=False
+        )
 
-        # === Model training ===
-        model = RandomForestClassifier(n_estimators=100, random_state=42)
+        # === Model Training ===
+        model = RandomForestClassifier(
+            n_estimators=200,
+            random_state=42,
+            n_jobs=-1,
+            max_depth=10
+        )
         model.fit(X_train, y_train)
         self.model = model
 
-        # === Evaluate ===
+        # === Evaluation ===
         preds = model.predict(X_test)
         acc = accuracy_score(y_test, preds)
         logger.info(f"Trainer: model trained. Accuracy={acc:.3f}, Samples={len(X)}")
 
-        # === Save ===
+        # === Save Model ===
         os.makedirs(os.path.dirname(self.model_path), exist_ok=True)
         joblib.dump(model, self.model_path)
         logger.info(f"Trainer: model saved to {self.model_path}")
 
+        # === Save Metadata ===
+        metadata = {
+            "model_path": self.model_path,
+            "timestamp": datetime.utcnow().isoformat(),
+            "rows_trained": len(X_train),
+            "rows_tested": len(X_test),
+            "features_used": feature_cols,
+            "accuracy": acc,
+            "model_type": "RandomForestClassifier"
+        }
+        with open(self.meta_path, "w") as f:
+            json.dump(metadata, f, indent=2)
+        logger.info(f"Trainer: metadata saved to {self.meta_path}")
+
         return model
 
-    def load(self):
-        """Load a trained model from disk."""
-        if os.path.exists(self.model_path):
+    def load(self) -> RandomForestClassifier | None:
+        """Load a trained model from disk with safety checks."""
+        if not os.path.exists(self.model_path):
+            logger.warning(f"Trainer: model not found at {self.model_path}")
+            return None
+
+        try:
             self.model = joblib.load(self.model_path)
             logger.info(f"Trainer: loaded model from {self.model_path}")
             return self.model
-        logger.warning(f"Trainer: model not found at {self.model_path}")
-        return None
+        except Exception as e:
+            logger.error(f"Trainer: failed to load model ({e})")
+            return None
+
+    def evaluate(self, df: pd.DataFrame) -> float:
+        """Evaluate the loaded model on a new dataset and return accuracy."""
+        if self.model is None:
+            logger.error("Trainer: no model loaded for evaluation.")
+            return 0.0
+
+        feat_df = make_features(df).dropna()
+        if "close" not in feat_df.columns or len(feat_df) < 20:
+            logger.error("Trainer: invalid data for evaluation.")
+            return 0.0
+
+        feat_df["future_return"] = feat_df["close"].pct_change().shift(-1)
+        feat_df["target"] = (feat_df["future_return"] > 0).astype(int)
+        feat_df = feat_df.dropna()
+
+        feature_cols = [
+            c for c in feat_df.columns
+            if c not in ("timestamp", "target", "future_return", "open", "high", "low", "close", "volume")
+        ]
+        X, y = feat_df[feature_cols], feat_df["target"]
+
+        preds = self.model.predict(X)
+        acc = accuracy_score(y, preds)
+        logger.info(f"Trainer: evaluation accuracy={acc:.3f} on {len(X)} samples")
+        return acc
