@@ -1,0 +1,62 @@
+# === Python Artifacts ===
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.pkl
+*.log
+
+# === Virtual Environments ===
+.venv/
+env/
+venv/
+ENV/
+*.env
+
+# === Data & Models ===
+data/
+models/
+*.csv
+*.jsonl
+*.db
+*.sqlite
+*.h5
+*.npy
+*.npz
+
+# === Notebooks & Checkpoints ===
+.ipynb_checkpoints/
+*.ipynb
+
+# === System / IDE ===
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.code-workspace
+
+# === Build / Dist ===
+dist/
+build/
+*.egg-info/
+.eggs/
+
+# === Docker / Compose ===
+*.pid
+docker-compose.override.yml
+
+# === Logs & Results ===
+logs/
+results/
+forward_results/
+backtest_results/
+
+# === Dashboard cache ===
+visual/__pycache__/
+visual/static/
+visual/templates/__pycache__/
+
+# === OS / Misc ===
+*.bak
+*.tmp
+project_tree.txt
