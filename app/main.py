@@ -11,13 +11,15 @@ from .data.simulator import stream_bars
 from .data.loader import load_sample
 from .backtest.backtester import Backtester
 from .monitor.logger import get_logger
-from .db import engine, get_session
+from app.db.init import get_engine, get_session
 from .models.schema import Base, Metric
 from .ml.trainer import Trainer
 from .ml.training import retrain_on_recent
 
 logger = get_logger(__name__)
 cfg = load_config()
+engine = get_engine()
+session = get_session()
 
 # === Database Initialization ===
 def init_db():
@@ -69,7 +71,7 @@ def forward_mode(args):
     from .ml.features import make_features
     from .data.loader import load_sample
     from .data.simulator import stream_bars
-    from .db import get_session
+    from .db import engine, get_session
     from .models.schema import TradeMetric
 
     logger.info("=== Forward Paper Trading Mode ===")

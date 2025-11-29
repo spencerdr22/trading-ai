@@ -22,10 +22,10 @@ import torch.optim as optim
 from torch.distributions import Categorical
 
 from sqlalchemy.orm import Session
-from ..db.init import get_engine
-from ..db.schema import TradeMetric
+from app.db.init import get_engine
+from app.db.schema import TradeMetric
 
-from ..monitor.logger import get_logger
+from app.monitor.logger import get_logger
 from .reward import compute_batch_reward
 from .model_hub import ModelHub
 

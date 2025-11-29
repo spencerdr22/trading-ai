@@ -15,7 +15,57 @@ import argparse
 import os
 import datetime
 import numpy as np
-import plotly.graph_objs as go
+# Attempt to import plotly; if unavailable provide a minimal fallback to avoid import errors.
+try:
+    import plotly.graph_objects as go
+except Exception:
+    # Minimal fallback implementation that mimics the parts of plotly used in this module.
+    class _FallbackFigure:
+        def __init__(self):
+            self.traces = []
+            self.layout = {}
+
+        def add_trace(self, trace):
+            self.traces.append(trace)
+
+        def update_layout(self, **kwargs):
+            self.layout.update(kwargs)
+
+        def write_html(self, path):
+            # Create a very simple HTML representation of the data so callers won't fail.
+            title = self.layout.get("title", "plot")
+            xaxis = self.layout.get("xaxis_title", "x")
+            yaxis = self.layout.get("yaxis_title", "y")
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(f"<html><head><meta charset='utf-8'><title>{title}</title></head><body>")
+                f.write(f"<h2>{title}</h2>")
+                f.write(f"<p><strong>{xaxis}</strong> vs <strong>{yaxis}</strong></p>")
+                f.write("<pre>")
+                for t in self.traces:
+                    f.write(str(t))
+                    f.write("\n")
+                f.write("</pre></body></html>")
+
+    class _FallbackTrace(dict):
+        def __init__(self, **kwargs):
+            super().__init__(**kwargs)
+
+        def __repr__(self):
+            # Provide concise readable representation for fallback HTML
+            items = ", ".join(f"{k}={v}" for k, v in self.items())
+            return f"Trace({items})"
+
+    class _GoModule:
+        def Figure(self):
+            return _FallbackFigure()
+
+        def Scatter(self, **kwargs):
+            return _FallbackTrace(type="scatter", **kwargs)
+
+        def Bar(self, **kwargs):
+            return _FallbackTrace(type="bar", **kwargs)
+
+    go = _GoModule()
 
 from .learner import ReinforcementLearner
 from .optimizer import RLHyperOptimizer

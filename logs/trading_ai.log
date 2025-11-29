@@ -6227,3 +6227,15 @@
 2025-10-30 12:12:48,598 - __main__ - INFO - Saved forward results to C:\Users\spenc\Documents\trading-ai\data\forward_MES.csv
 2025-10-30 12:12:48,737 - __main__ - INFO - Paper run complete. Executed 2000 trades.
 2025-10-30 12:12:48,743 - __main__ - INFO - Saved forward results to data\forward_results_MES.csv
+2025-11-28 21:32:22,069 - app.db.init - INFO - DATABASE_URL not set. Defaulting to SQLite at data/trading_ai.db
+2025-11-28 21:32:22,131 - app.db.init - INFO - Database engine initialized.
+2025-11-28 21:32:22,207 - __main__ - INFO - DB initialized with ORM tables.
+2025-11-28 21:32:22,244 - __main__ - INFO - Scheduler started — nightly retrain at 00:00 UTC.
+2025-11-28 21:34:30,448 - app.db.init - INFO - DATABASE_URL not set. Defaulting to SQLite at data/trading_ai.db
+2025-11-28 21:34:30,497 - app.db.init - INFO - Database engine initialized.
+2025-11-28 21:34:30,500 - __main__ - INFO - DB initialized with ORM tables.
+2025-11-28 21:34:30,516 - __main__ - INFO - Scheduler started — nightly retrain at 00:00 UTC.
+2025-11-28 21:39:38,435 - app.db.init - INFO - DATABASE_URL not set. Defaulting to SQLite at data/trading_ai.db
+2025-11-28 21:39:38,482 - app.db.init - INFO - Database engine initialized.
+2025-11-28 21:39:38,485 - __main__ - INFO - DB initialized with ORM tables.
+2025-11-28 21:39:38,499 - __main__ - INFO - Scheduler started — nightly retrain at 00:00 UTC.

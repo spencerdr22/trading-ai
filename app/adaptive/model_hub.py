@@ -1,16 +1,11 @@
 """
 Module: model_hub.py
-Author: Adaptive Framework Generator
+Author: Adaptive Framework Generator (Corrected)
 Description:
     Centralized registry and persistence layer for managing all models
     (baseline, adaptive, and experimental) within the Trading-AI System.
     Handles saving, versioning, and loading models, along with reward
     metrics and metadata synchronization in the database.
-
-Dependencies:
-    - SQLAlchemy (via db/init.py and db/schema.py)
-    - joblib / torch for model persistence
-    - Unified logging via monitor/logger.py
 """
 
 import os
@@ -20,12 +15,12 @@ import torch
 import datetime
 from sqlalchemy import Column, Integer, String, Float, DateTime, JSON
 from sqlalchemy.orm import declarative_base, Session
-from ..db.init import get_engine
-from ..monitor.logger import get_logger
+from app.db.init import get_engine
+from app.monitor.logger import get_logger
 
 logger = get_logger(__name__)
 Base = declarative_base()
-
+ 
 # ============================================================
 # DATABASE TABLE DEFINITIONS
 # ============================================================
@@ -38,13 +33,13 @@ class ModelRegistry(Base):
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     model_name = Column(String, nullable=False)
-    model_type = Column(String, nullable=False)  # e.g. RandomForest, RLPolicy
+    model_type = Column(String, nullable=False)  # e.g., RandomForest, RLPolicy
     version = Column(String, nullable=False)
     accuracy = Column(Float, default=None)
     reward_score = Column(Float, default=None)
     file_path = Column(String, nullable=False)
     timestamp = Column(DateTime, default=datetime.datetime.utcnow)
-    metadata = Column(JSON, default={})
+    meta = Column(JSON, default={})  # ✅ FIX: renamed from 'metadata'
 
 # ============================================================
 # MODEL HUB CLASS
@@ -92,7 +87,7 @@ class ModelHub:
                 accuracy=metrics.get("accuracy") if metrics else None,
                 reward_score=metrics.get("reward") if metrics else None,
                 file_path=file_path,
-                metadata=metrics or {},
+                meta=metrics or {},
             )
             session.add(entry)
             session.commit()
@@ -133,8 +128,7 @@ class ModelHub:
 
             if entry.model_type.lower() == "rlpolicy":
                 logger.info(f"ModelHub: found RL model {entry.model_name} @ {entry.file_path}")
-                model_state = torch.load(entry.file_path)
-                return model_state
+                return torch.load(entry.file_path)
             else:
                 logger.info(f"ModelHub: found ML model {entry.model_name} @ {entry.file_path}")
                 return joblib.load(entry.file_path)
@@ -158,7 +152,7 @@ class ModelHub:
             if latest:
                 query = query.order_by(ModelRegistry.timestamp.desc())
             result = query.first()
-            return result.metadata if result else None
+            return result.meta if result else None
         finally:
             session.close()
 
