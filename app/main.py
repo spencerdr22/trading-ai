@@ -3,6 +3,9 @@ import json
 import logging
 import os
 import pandas as pd
+import warnings
+warnings.filterwarnings("ignore", category=UserWarning, module="pkg_resources")
+
 from datetime import datetime
 from apscheduler.schedulers.background import BackgroundScheduler
 

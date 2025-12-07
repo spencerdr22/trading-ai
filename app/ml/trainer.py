@@ -105,6 +105,7 @@ class Trainer:
             logger.error("Trainer: received empty DataFrame.")
             return None, None
 
+        # --- Feature generation first ---
         feat_df = make_features(df)
         if feat_df.empty:
             logger.error("Trainer: make_features() returned empty.")
@@ -114,15 +115,22 @@ class Trainer:
             logger.error("Trainer: missing 'close' column after feature generation.")
             return None, None
 
-        # Target: positive vs negative next-bar return
-        feat_df["future_return"] = feat_df["close"].pct_change().shift(-1)
-        feat_df["target"] = (feat_df["future_return"] > 0).astype(int)
+        # --- Safe copy before mutation (prevents SettingWithCopyWarning) ---
+        feat_df = feat_df.copy()
+
+        # --- Compute target features ---
+        feat_df["future_return"] = feat_df["close"].pct_change().shift(-1).fillna(0)
+        feat_df.loc[:, "target"] = (feat_df["future_return"] > 0).astype(int)
         feat_df = feat_df.dropna()
 
+        # --- Feature selection ---
         feature_cols = [
             c for c in feat_df.columns
-            if c not in ("timestamp", "target", "future_return", "open", "high", "low", "close", "volume")
-        ]
+            if c not in (
+                "timestamp", "target", "future_return",
+                "open", "high", "low", "close", "volume"
+            )
+        ]   
 
         if not feature_cols:
             logger.error("Trainer: no usable feature columns found.")
@@ -130,6 +138,7 @@ class Trainer:
 
         X = feat_df[feature_cols]
         y = feat_df["target"]
+
         return X, y
 
     # ----------------------------------------------------------
@@ -145,8 +154,9 @@ class Trainer:
             n_estimators=200,
             n_jobs=-1,
             max_depth=10,
-            random_state=42
-        )
+            random_state=42,
+            max_features="sqrt",  # future-proof default
+)
         model.fit(X_train, y_train)
         preds = model.predict(X_test)
 
@@ -173,7 +183,7 @@ class Trainer:
             sequences.append(seq)
             labels.append(label)
 
-        X_tensor = torch.tensor(sequences, dtype=torch.float32)
+        X_tensor = torch.tensor(np.array(sequences), dtype=torch.float32)
         y_tensor = torch.tensor(labels, dtype=torch.long)
 
         return X_tensor, y_tensor

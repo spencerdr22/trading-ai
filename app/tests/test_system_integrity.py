@@ -77,7 +77,7 @@ def test_model_training(tmp_path: Path=Path("data/models/test_model.pkl")):
         # Create fake OHLCV data
         np.random.seed(42)
         df = pd.DataFrame({
-            "timestamp": pd.date_range("2025-01-01", periods=200, freq="T"),
+            "timestamp": pd.date_range("2025-01-01", periods=200, freq="min"),
             "open": np.random.rand(200) * 100,
             "high": np.random.rand(200) * 100,
             "low": np.random.rand(200) * 100,

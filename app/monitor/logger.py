@@ -7,6 +7,9 @@ import logging
 import sys
 import io
 import os
+import warnings
+warnings.filterwarnings("ignore", category=UserWarning)
+warnings.filterwarnings("ignore", category=FutureWarning)
 from logging.handlers import RotatingFileHandler
 
 LOG_DIR = os.path.join("data", "logs")

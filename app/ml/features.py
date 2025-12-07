@@ -47,6 +47,6 @@ def make_features(df: pd.DataFrame, window: int = 30) -> pd.DataFrame:
     df["vol_mean_30"] = df["volume"].rolling(min(30, len(df)), min_periods=1).mean()
 
     # Instead of dropping everything, just fill missing indicators for small sets
-    df = df.fillna(method="bfill").fillna(method="ffill").fillna(0)
+    df = df.bfill().ffill().fillna(0)
 
     return df
