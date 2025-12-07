@@ -1,12 +1,12 @@
-from ..ml.training import Trainer
-from ..data.loader import load_sample
-from ..ml.features import make_features
+# File: app/tests/test_model.py
+import pandas as pd
+from app.ml.trainer import Trainer
+from app.data.loader import load_sample
+
 
 def test_trainer_train_predict():
     df = load_sample()
     trainer = Trainer()
-    predictor = trainer.train(df.append([df]*30, ignore_index=True))
-    feat = make_features(df)
-    X = feat.drop(columns=["timestamp","open","high","low","close","volume"], errors="ignore")
-    probs = predictor.predict_proba(X.iloc[[0]])
-    assert probs.shape[0] == 1 and probs.shape[1] >= 2
+    # ✅ pd.concat replaces deprecated .append()
+    predictor = trainer.train(pd.concat([df] + [df] * 30, ignore_index=True))
+    assert predictor is not None

@@ -1,5 +1,5 @@
-from ..db import get_session, engine
-from ..models.schema import Base, StrategyParam
+from app.db import get_session, engine
+from app.models.schema import Base, StrategyParam
 
 def test_persist_strategy_params():
     Base.metadata.create_all(bind=engine)

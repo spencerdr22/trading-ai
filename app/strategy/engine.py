@@ -43,31 +43,28 @@ ACTION_TO_ID = {v: k for k, v in ACTIONS.items()}
 # STRATEGY ENGINE
 # ================================================================
 
+# File: app/strategy/engine.py
+
 class StrategyEngine:
-
-    def __init__(self, model, model_type="rf", rl_model_name="adaptive_policy"):
+    def __init__(self, predictor, adaptor, cfg, classes=None):
         """
-        model         — supervised model (RF/LSTM/Hybrid)
-        model_type    — "rf", "lstm", or "hybrid"
-        rl_model_name — name used in ModelHub for RL policy
+        StrategyEngine integrates model predictions with adaptive logic.
+        Args:
+            predictor: trained ML model (e.g. RandomForest)
+            adaptor: Adaptor instance managing thresholds and behavior
+            cfg: strategy configuration dictionary
+            classes: optional list of label classes [-1, 0, 1]
         """
-        self.model = model
-        self.model_type = model_type
+        self.predictor = predictor
+        self.adaptor = adaptor
+        self.cfg = cfg
+        self.classes = classes or [-1, 0, 1]
 
-        self.hub = ModelHub()
+        # optional: log for traceability
+        from app.monitor.logger import get_logger
+        logger = get_logger(__name__)
+        logger.info(f"StrategyEngine initialized with classes={self.classes}")
 
-        # Load RL policy network (PyTorch)
-        self.rl_policy = self.hub.load_model(
-            model_name=rl_model_name,
-            model_type="RLPolicy"
-        )
-
-        if self.rl_policy is None:
-            logger.warning("StrategyEngine: No RL policy found, running supervised-only.")
-        else:
-            self.rl_policy.eval()
-
-        logger.info(f"StrategyEngine initialized: model_type={model_type}")
 
     # --------------------------------------------------------------------
     # FEATURE PREPARATION
@@ -187,6 +184,45 @@ class StrategyEngine:
             "sell": blended_sell,
             "rl_confidence": rl_conf,
         }
+
+    # --------------------------------------------------------------------
+    # BAR-LEVEL INFERENCE (used by Backtester)
+    # --------------------------------------------------------------------
+
+    def on_bar(self, X_row):
+        """
+        Called on each bar by the backtester.
+            Returns a structured signal dict compatible with simulator_executor.
+        """
+        import pandas as pd
+        try:
+            # ensure DataFrame format
+            if isinstance(X_row, pd.Series):
+                X_row = X_row.to_frame().T
+
+            features = X_row.select_dtypes(include=[np.number]).iloc[0].to_numpy()
+
+            # Perform model decision
+            decision = self.decide(features)
+            action = decision["action"].upper()
+
+            # Convert to standardized numeric + text form
+            signal_map = {"BUY": 1, "HOLD": 0, "SELL": -1}
+            raw_signal = signal_map.get(action, 0)
+
+            adjusted_signal = self.adaptor.adapt(raw_signal)
+
+            logger.debug(f"on_bar: {action} (raw={raw_signal}, adjusted={adjusted_signal})")
+
+            # ✅ Structured dictionary for simulator compatibility
+            return {
+                "side": "BUY" if adjusted_signal == 1 else "SELL" if adjusted_signal == -1 else "HOLD",
+                "strength": abs(adjusted_signal)
+            }
+
+        except Exception as e:
+            logger.error(f"on_bar error: {e}")
+            return {"side": "HOLD", "strength": 0}
 
     # --------------------------------------------------------------------
     # FINAL DECISION

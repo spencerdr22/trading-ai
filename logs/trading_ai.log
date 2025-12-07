@@ -6239,3 +6239,7 @@
 2025-11-28 21:39:38,482 - app.db.init - INFO - Database engine initialized.
 2025-11-28 21:39:38,485 - __main__ - INFO - DB initialized with ORM tables.
 2025-11-28 21:39:38,499 - __main__ - INFO - Scheduler started — nightly retrain at 00:00 UTC.
+2025-11-28 21:44:51,513 - app.db.init - INFO - DATABASE_URL not set. Defaulting to SQLite at data/trading_ai.db
+2025-11-28 21:44:51,527 - app.db.init - INFO - Database engine initialized.
+2025-11-28 21:44:51,572 - app.ml.trainer - INFO - Training model_type=rf on 199 samples
+2025-11-28 21:44:51,779 - app.ml.trainer - INFO - RF model accuracy: 0.7250

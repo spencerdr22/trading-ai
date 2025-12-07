@@ -1,4 +1,4 @@
-from ..strategy.adaption import Adaptor
+from app.strategy.adaption import Adaptor
 
 def test_adaptor_improves_or_changes():
     a = Adaptor()
