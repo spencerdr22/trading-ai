@@ -26,10 +26,7 @@ import subprocess
 import logging
 from pathlib import Path
 from statistics import mean
-from logger import get_logger
-from dotenv import load_dotenv
-load_dotenv()
-
+from ..monitor.logger import get_logger
 
 logger = get_logger(__name__)
 
@@ -266,111 +263,12 @@ def save_oipr_reports(oipr):
         f.write(md_filled)
 
     logger.info(f"OIPR: Reports generated → {json_path}, {md_output}")
-    
-# ======================================================================
-# EMAIL NOTIFICATION INTEGRATION
-# ======================================================================
-
-import smtplib
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
-
-def send_oipr_email(oipr, recipient="spencer.druckenbroad@proton.me"):
-    """
-    Sends the latest OIPR Markdown summary via email.
-    """
-    try:
-        md_path = Path("reports/oipr/latest_OIPR.md")
-        if not md_path.exists():
-            logger.warning("OIPR Email: latest markdown report not found.")
-            return
-
-        with open(md_path, "r", encoding="utf-8") as f:
-            md_content = f.read()
-
-        # Email details
-        sender_email = os.getenv("OIPR_EMAIL_SENDER", "trading-ai@localhost")
-        smtp_server = os.getenv("OIPR_SMTP_SERVER", "smtp.gmail.com")
-        smtp_port = int(os.getenv("OIPR_SMTP_PORT", 587))
-        smtp_user = os.getenv("OIPR_SMTP_USER", "")
-        smtp_pass = os.getenv("OIPR_SMTP_PASS", "")
-
-        msg = MIMEMultipart("alternative")
-        msg["Subject"] = f"OIPR+ Report — {oipr['status']} | Integrity {oipr['integrity_score']}"
-        msg["From"] = sender_email
-        msg["To"] = recipient
-
-        body_text = f"""\
-        Operational Integrity & Performance Report (OIPR+)
-        Status: {oipr['status']}
-        Integrity Score: {oipr['integrity_score']}
-        Accuracy Δ: {oipr['deltas']['accuracy_delta']:+.4f}
-        Integrity Δ: {oipr['deltas']['integrity_delta']:+.1f}
-        
-        Findings:
-        {' '.join(oipr['findings'])}
-        """
-
-        # Attach both plain text and Markdown
-        msg.attach(MIMEText(body_text, "plain"))
-        msg.attach(MIMEText(md_content, "html"))
-
-        # Connect and send
-        with smtplib.SMTP(smtp_server, smtp_port) as server:
-            server.starttls()
-            if smtp_user and smtp_pass:
-                server.login(smtp_user, smtp_pass)
-            server.send_message(msg)
-
-        logger.info(f"OIPR Email: Report sent successfully to {recipient}")
-    except Exception as e:
-        logger.warning(f"OIPR Email: Failed to send report: {e}")
-
 
 # ======================================================================
 # MAIN
 # ======================================================================
 
 def main():
-    """
-    Generate an Enhanced Operational Integrity and Performance Report (OIPR+).
-
-    Orchestrates the end-to-end creation of an OIPR by running test summaries,
-    extracting performance metrics from logs, collecting runtime metadata, comparing
-    against the previous report, constructing the consolidated report dictionary,
-    and persisting report artifacts.
-
-    Behavior / workflow:
-    - run_pytest_summary(): execute or collect pytest results and return test summaries.
-    - extract_performance_from_logs(): parse logs to compute performance metrics.
-    - collect_metadata(): gather environment and run metadata.
-    - load_previous_oipr(): load the prior OIPR to enable delta calculations.
-    - build_oipr_dict(tests, perf, meta, previous): aggregate inputs into the final OIPR dict.
-    - save_oipr_reports(oipr): persist files or records representing the generated report.
-    - Log an INFO summary line including overall status, accuracy/integrity deltas, and anomaly count.
-
-    Returns:
-        dict: The generated OIPR dictionary. Typical keys include:
-            - 'status' (str): overall report status (e.g., "ok", "warning", "fail").
-            - 'deltas' (dict): numeric differences vs. previous run (e.g., 'accuracy_delta',
-              'integrity_delta').
-            - 'anomaly_count' (int): number of detected anomalies.
-            - ...other fields as produced by build_oipr_dict().
-
-    Side effects:
-        - May execute tests and read log files.
-        - Persists report artifacts to disk or external storage via save_oipr_reports().
-        - Emits INFO-level logging describing progress and a summary.
-
-    Exceptions:
-        - Exceptions raised by any helper function (I/O, parsing, test execution, etc.)
-          are propagated to the caller. Callers should handle these if they need resilience.
-
-    Notes:
-        - This function is intended as a top-level orchestration entry point and is
-          synchronous/blocking. Keep helper functions small and testable to simplify
-          error handling and maintainability.
-    """
     logger.info("Generating Enhanced Operational Integrity and Performance Report (OIPR+)...")
     tests = run_pytest_summary()
     perf = extract_performance_from_logs()
@@ -379,11 +277,6 @@ def main():
     oipr = build_oipr_dict(tests, perf, meta, previous)
     save_oipr_reports(oipr)
     logger.info(f"OIPR+ complete. Status: {oipr['status']} | Δ Accuracy={oipr['deltas']['accuracy_delta']:+.4f} | Δ Integrity={oipr['deltas']['integrity_delta']:+.1f} | Anomalies={oipr['anomaly_count']}")
-    return oipr
 
 if __name__ == "__main__":
-    generated_oipr = main()
-    try:
-        send_oipr_email(generated_oipr)
-    except Exception as e:
-        logger.warning(f"OIPR: email delivery skipped due to error: {e}")
+    main()
