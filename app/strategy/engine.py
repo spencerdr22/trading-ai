@@ -60,6 +60,17 @@ class StrategyEngine:
         self.cfg = cfg
         self.classes = classes or [-1, 0, 1]
 
+        # ✅ Ensure supervised inference attributes are defined
+        self.model = getattr(predictor, "model", predictor)
+        self.model_type = getattr(predictor, "model_type", "rf")
+
+        # Optional: RL policy hook for adaptive blending
+        self.rl_policy = getattr(predictor, "rl_policy", None)
+
+        from app.monitor.logger import get_logger
+        logger = get_logger(__name__)
+        logger.info(f"StrategyEngine initialized with classes={self.classes} and model_type={self.model_type}")
+
         # optional: log for traceability
         from app.monitor.logger import get_logger
         logger = get_logger(__name__)
