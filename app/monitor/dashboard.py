@@ -161,3 +161,44 @@ with diag_col2:
 
 st.markdown("---")
 st.caption(f"Last updated: {datetime.utcnow().isoformat()} (UTC)")
+
+# Validation Results Section
+st.subheader("🔬 Validation Results")
+
+# Walk-forward results
+wf_files = glob.glob("data/validation/walk_forward_*.json")
+if wf_files:
+    latest_wf = max(wf_files, key=os.path.getmtime)
+    with open(latest_wf, 'r') as f:
+        wf_data = json.load(f)
+    
+    st.metric("Walk-Forward Splits", wf_data['n_splits'])
+    
+    if 'aggregated_metrics' in wf_data:
+        agg = wf_data['aggregated_metrics']
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.metric("Avg Accuracy", f"{agg.get('accuracy', {}).get('mean', 0):.2%}")
+        with col2:
+            st.metric("Stability", agg.get('stability', {}).get('accuracy', 'N/A'))
+
+# Monte Carlo results
+mc_files = glob.glob("data/validation/monte_carlo_*.json")
+if mc_files:
+    latest_mc = max(mc_files, key=os.path.getmtime)
+    with open(latest_mc, 'r') as f:
+        mc_data = json.load(f)
+    
+    st.metric("MC Sequences", mc_data['n_sequences'])
+    
+    if 'summary_metrics' in mc_data:
+        summary = mc_data['summary_metrics']
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            st.metric("Expected Sharpe", f"{summary['sharpe']['mean']:.2f}")
+        with col2:
+            st.metric("Expected Max DD", f"{summary['max_drawdown']['mean']:.2f}")
+        with col3:
+            st.metric("Sharpe Stability", summary.get('stability_assessment', {}).get('sharpe_stability', 'N/A'))

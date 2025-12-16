@@ -24,3 +24,19 @@ default:
     volatility: 0.0008
     seed: 42
     fast_bar_seconds: 0.5
+# Validation settings
+validation:
+  walk_forward:
+    n_splits: 5
+    mode: anchored
+    test_size: null
+  
+  monte_carlo:
+    n_sequences: 1000
+    block_size: 20
+    percentiles: [5, 25, 50, 75, 95]
+  
+  vectorbt:
+    initial_cash: 10000.0
+    fees: 0.001
+    slippage: 0.0005

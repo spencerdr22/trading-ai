@@ -13,3 +13,10 @@ torch==2.2.0
 stable-baselines3==2.3.0
 optuna==3.3
 setuptools<81
+
+# Advanced backtesting and validation (ml_project_scaffold integration)
+vectorbt==0.26.1
+mlflow==2.9.2
+
+# Additional utilities
+python-dotenv==1.0.0
