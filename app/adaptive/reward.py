@@ -64,8 +64,8 @@ def compute_reward(
     win_rate,
     leverage_factor=1.0,
     pnl_weight=0.5,
-    sharpe_weight=0.2,
-    sortino_weight=0.2,
+    sharpe_weight=0.1,      # Reduced: secondary metric
+    sortino_weight=0.3,     # Increased: primary risk metric
     dd_penalty_weight=0.3,
     win_rate_weight=0.4
 ):

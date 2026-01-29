@@ -28,3 +28,29 @@ def sharpe_minute(returns, risk_free=0.0):
         return 0.0
     # scale to daily-ish (approx 390 minutes per trading day)
     return (mean - risk_free) / std * np.sqrt(390)
+
+def sortino_minute(returns, risk_free=0.0):
+    """
+    Compute Sortino ratio for minute-level returns.
+    Only penalizes downside volatility (better for trading systems).
+    
+    Args:
+        returns: Series of minute returns
+        risk_free: Risk-free rate (default 0.0)
+    
+    Returns:
+        Sortino ratio scaled to daily-ish frequency
+    """
+    mean = np.mean(returns)
+    downside = returns[returns < risk_free]
+    
+    if len(downside) == 0:
+        return float('inf')  # No downside = perfect
+    
+    downside_std = np.std(downside, ddof=1)
+    if downside_std == 0:
+        return 0.0
+    
+    # Scale to daily-ish (approx 390 minutes per trading day)
+    return (mean - risk_free) / downside_std * np.sqrt(390)
+

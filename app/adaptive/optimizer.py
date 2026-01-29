@@ -59,8 +59,8 @@ class RLHyperOptimizer:
         gamma = trial.suggest_float("gamma", 0.90, 0.999)
 
         pnl_weight = trial.suggest_float("pnl_weight", 0.3, 0.7)
-        sharpe_weight = trial.suggest_float("sharpe_weight", 0.1, 0.4)
-        sortino_weight = trial.suggest_float("sortino_weight", 0.1, 0.4)
+        sharpe_weight = trial.suggest_float("sharpe_weight", 0.05, 0.15)  # Reduced range
+        sortino_weight = trial.suggest_float("sortino_weight", 0.2, 0.4)  # Increased range
         dd_penalty_weight = trial.suggest_float("dd_penalty_weight", 0.2, 0.5)
 
         # Simple 1-layer trial policy for speed

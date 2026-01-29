@@ -1,4 +1,39 @@
 # Trading-AI System — Adaptive RL Upgrade
+
+---
+
+## Sortino-Prioritized Reward Update — 2026-01-29
+**Type:** Performance Enhancement
+
+### Changes:
+- **reward.py**: Updated default weights
+  - Sharpe weight: 0.2 → 0.1 (reduced)
+  - Sortino weight: 0.2 → 0.3 (increased)
+  - Rationale: Sortino better captures asymmetric trading returns
+  
+- **metrics.py**: Added `sortino_minute()` function
+  - Computes Sortino ratio for minute-level returns
+  - Only penalizes downside volatility
+  - Scaled to daily frequency (√390)
+  
+- **optimizer.py**: Updated hyperparameter ranges
+  - Sharpe range: [0.1, 0.4] → [0.05, 0.15]
+  - Sortino range: [0.1, 0.4] → [0.2, 0.4]
+  - Encourages Optuna to prefer Sortino-heavy configurations
+
+### Impact:
+- RL policy will learn to minimize downside risk specifically
+- Upside volatility no longer penalized equally with downside
+- Better alignment with practical trading objectives
+
+### Testing:
+```bash
+pytest -v app/tests/test_reward.py
+python -m app.adaptive.run_offline_rl --episodes 10 --tune
+```
+
+---
+
 **Version:** 2025-11  
 **Maintainer:** Spencer Druckenbroad  
 **AI Collaborator:** GPT-5 Adaptive Systems Suite  
