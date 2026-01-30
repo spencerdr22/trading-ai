@@ -35,14 +35,25 @@ def compute_sharpe(pnl_series):
 def compute_sortino(pnl_series):
     """
     Compute Sortino ratio using downside deviation only.
+    Returns inf for all-positive returns (perfect downside protection).
     """
     returns = np.array(pnl_series)
     if len(returns) < 2:
         return 0.0
 
-    downside = np.std([r for r in returns if r < 0]) or 1e-9
     mean_r = np.mean(returns)
-    return float(mean_r / downside)
+    downside_returns = [r for r in returns if r < 0]
+    
+    # If no downside, return high value (perfect Sortino)
+    if len(downside_returns) == 0:
+        return float('inf') if mean_r > 0 else 0.0
+    
+    downside_std = np.std(downside_returns)
+    # Protect against zero std in downside (all losses identical)
+    if downside_std == 0:
+        return 0.0
+    
+    return float(mean_r / downside_std)
 
 
 def compute_drawdown(pnl_series):
@@ -89,12 +100,15 @@ def compute_reward(
     sharpe = compute_sharpe(pnl_series)
     sortino = compute_sortino(pnl_series)
     drawdown = compute_drawdown(pnl_series)
+    
+    # Cap Sortino at 10.0 to prevent inf from breaking reward calculation
+    sortino_capped = min(sortino, 10.0) if sortino != float('inf') else 10.0
 
     # Weighted scoring
     reward = (
         (total_pnl * pnl_weight)
         + (sharpe * sharpe_weight)
-        + (sortino * sortino_weight)
+        + (sortino_capped * sortino_weight)
         + (win_rate * win_rate_weight)
         - (drawdown * dd_penalty_weight)
         - (abs(leverage_factor - 1.0) * 0.1)   # discourage excessive leverage

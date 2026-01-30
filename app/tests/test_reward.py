@@ -38,14 +38,16 @@ def test_compute_sortino():
     sortino = compute_sortino(pnl)
     assert sortino > 0, "Positive mean PnL should have positive Sortino"
     
-    # Only positive returns
+    # Only positive returns (perfect Sortino = inf)
     pnl_positive = [1, 2, 3, 4, 5]
     sortino_positive = compute_sortino(pnl_positive)
-    assert sortino_positive > 0, "All positive returns should have high Sortino"
+    assert sortino_positive == float('inf'), "All positive returns should have infinite Sortino"
     
-    # Sortino should be higher than Sharpe for asymmetric returns
-    sharpe = compute_sharpe(pnl_positive)
-    assert sortino_positive > sharpe, "Sortino should be higher for upside-skewed returns"
+    # Mixed returns - Sortino should be higher than Sharpe for upside-skewed returns
+    pnl_mixed = [5, 3, -1, 8, 2, -0.5, 6]
+    sortino_mixed = compute_sortino(pnl_mixed)
+    sharpe_mixed = compute_sharpe(pnl_mixed)
+    assert sortino_mixed > sharpe_mixed, "Sortino should be higher for upside-skewed returns"
 
 
 def test_compute_drawdown():
@@ -126,13 +128,32 @@ def test_reward_clipping():
 
 def test_leverage_penalty():
     """Test that high leverage is penalized."""
-    pnl = [1, 2, 3, 4, 5]
-    win_rate = 0.8
+    # Use smaller PnL values to avoid hitting reward ceiling
+    pnl = [0.5, 0.3, -0.1, 0.4, 0.2]  # Modest returns
+    win_rate = 0.6  # 60% win rate
     
     reward_low_lev = compute_reward(pnl, win_rate, leverage_factor=1.0)
     reward_high_lev = compute_reward(pnl, win_rate, leverage_factor=3.0)
     
+    # Both should be below the 10.0 ceiling to see the penalty
+    assert reward_low_lev < 10.0, "Reward should not hit ceiling for this test"
+    assert reward_high_lev < 10.0, "Reward should not hit ceiling for this test"
     assert reward_low_lev > reward_high_lev, "High leverage should reduce reward"
+
+
+def test_sortino_infinity_handling():
+    """Test that infinite Sortino (all positive returns) is handled correctly."""
+    pnl_perfect = [1, 2, 3, 4, 5]  # All positive
+    win_rate = 1.0
+    
+    # Should not raise exception and should return finite reward
+    reward = compute_reward(pnl_perfect, win_rate)
+    
+    assert isinstance(reward, float), "Reward should be float"
+    assert not np.isinf(reward), "Reward should not be inf"
+    assert not np.isnan(reward), "Reward should not be nan"
+    assert -10.0 <= reward <= 10.0, "Reward should be within bounds"
+    assert reward > 0, "Perfect trading should have positive reward"
 
 
 if __name__ == "__main__":
