@@ -54,12 +54,27 @@ def get_engine():
 
 def get_session():
     """
-    Returns a new session instance for interacting with the database.
+    Returns a context-manager-compatible session.
+    Usage: with get_session() as s: ...
     """
     global _SessionFactory
     if _SessionFactory is None:
         _SessionFactory = sessionmaker(bind=get_engine(), autoflush=False, autocommit=False)
-    return _SessionFactory()
+    from contextlib import contextmanager
+
+    @contextmanager
+    def _session_ctx():
+        session = _SessionFactory()
+        try:
+            yield session
+            session.commit()
+        except Exception:
+            session.rollback()
+            raise
+        finally:
+            session.close()
+
+    return _session_ctx()
 
 
 # ============================================================

@@ -1,13 +1,11 @@
 """
 Database package initializer for Trading-AI.
-Exposes SQLAlchemy engine and session helpers for easy import.
+Exposes engine and session helpers for easy import.
+
+get_engine() and get_session() are lazy — the engine is only
+created on first call, not at import time.
 """
 
 from app.db.init import get_engine, get_session
-from sqlalchemy.orm import sessionmaker
 
-# Initialize the shared engine and session factory
-engine = get_engine()
-SessionLocal = sessionmaker(bind=engine)
-
-__all__ = ["engine", "get_engine", "get_session", "SessionLocal"]
+__all__ = ["get_engine", "get_session"]

@@ -27,9 +27,16 @@ from sklearn.ensemble import RandomForestClassifier
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import accuracy_score
 
-import torch
-import torch.nn as nn
-import torch.optim as optim
+try:
+    import torch
+    import torch.nn as nn
+    import torch.optim as optim
+    TORCH_AVAILABLE = True
+except ImportError:
+    TORCH_AVAILABLE = False
+    torch = None  # type: ignore
+    nn    = None  # type: ignore
+    optim = None  # type: ignore
 
 from ..monitor.logger import get_logger
 from .features import make_features
@@ -42,7 +49,7 @@ logger = get_logger(__name__)
 # LSTM MODEL DEFINITION
 # ============================================================
 
-class LSTMClassifier(nn.Module):
+class LSTMClassifier(nn.Module if TORCH_AVAILABLE else object):  # type: ignore
     """
     A small LSTM classifier for predicting upward/downward movement.
 
@@ -118,9 +125,18 @@ class Trainer:
         # --- Safe copy before mutation (prevents SettingWithCopyWarning) ---
         feat_df = feat_df.copy()
 
-        # --- Compute target features ---
-        feat_df["future_return"] = feat_df["close"].pct_change().shift(-1).fillna(0)
-        feat_df.loc[:, "target"] = (feat_df["future_return"] > 0).astype(int)
+        # --- Compute target: predict next 3-bar return vs ATR threshold ---
+        # Require the move to be meaningful (> 0.3x ATR) before labelling as 1
+        # This filters out noise and forces the model to predict real moves
+        future_ret = feat_df["close"].pct_change(3).shift(-3).fillna(0)
+        atr_vals   = feat_df["close"].rolling(14, min_periods=1).std().fillna(
+            feat_df["close"].std()
+        )
+        threshold  = 0.0003   # ~0.03% minimum move (roughly 1-2 MES ticks)
+        feat_df["future_return"] = future_ret
+        feat_df.loc[:, "target"] = (
+            future_ret > threshold
+        ).astype(int)
         feat_df = feat_df.dropna()
 
         # --- Feature selection ---
@@ -151,12 +167,14 @@ class Trainer:
         )
 
         model = RandomForestClassifier(
-            n_estimators=200,
+            n_estimators=300,
             n_jobs=-1,
-            max_depth=10,
+            max_depth=6,          # shallower = less overfit on financial noise
+            min_samples_leaf=20,  # require meaningful support before splitting
+            max_features="sqrt",
+            class_weight="balanced",  # handle imbalanced up/down classes
             random_state=42,
-            max_features="sqrt",  # future-proof default
-)
+        )
         model.fit(X_train, y_train)
         preds = model.predict(X_test)
 
@@ -189,6 +207,8 @@ class Trainer:
         return X_tensor, y_tensor
 
     def _train_lstm(self, X, y):
+        if not TORCH_AVAILABLE:
+            raise RuntimeError("PyTorch not installed — cannot train LSTM model.")
         X_tensor, y_tensor = self._prepare_lstm_sequences(X, y)
         feature_dim = X_tensor.shape[-1]
         model = LSTMClassifier(feature_dim)

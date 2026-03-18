@@ -31,7 +31,6 @@ def compute_forward_stats(df: pd.DataFrame):
         return {"trades": 0, "win_rate": 0.0, "total_pnl": 0.0, "max_drawdown": 0.0}
 
     wins = df[df["pnl"] > 0]
-    losses = df[df["pnl"] <= 0]
 
     total_pnl = df["pnl"].sum()
     avg_pnl = df["pnl"].mean()

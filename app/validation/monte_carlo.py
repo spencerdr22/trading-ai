@@ -199,8 +199,16 @@ def monte_carlo_analysis(
             'percentiles': equity_percentiles
         },
         'stability_assessment': {
-            'mean_R_stability': 'stable' if summary['mean_R']['std'] / abs(summary['mean_R']['mean']) < 0.3 else 'unstable',
-            'sharpe_stability': 'stable' if summary['sharpe']['std'] / abs(summary['sharpe']['mean']) < 0.5 else 'unstable',
+            'mean_R_stability': (
+                'stable' if abs(summary['mean_R']['mean']) < 1e-9
+                else 'stable' if summary['mean_R']['std'] / abs(summary['mean_R']['mean']) < 0.3
+                else 'unstable'
+            ),
+            'sharpe_stability': (
+                'stable' if abs(summary['sharpe']['mean']) < 1e-9
+                else 'stable' if summary['sharpe']['std'] / abs(summary['sharpe']['mean']) < 0.5
+                else 'unstable'
+            ),
             'max_dd_variability': summary['max_drawdown']['std']
         }
     }

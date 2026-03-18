@@ -9,12 +9,16 @@ default:
       atr: 14
     use_pytorch: false
   risk:
-    stop_loss_ticks: 8
-    take_profit_ticks: 12
-    tick_value: 5.0
-    contract_cost: 1.25
-    max_contracts: 4
-    risk_per_trade_pct: 0.01
+    # MES contract specs: tick size = 0.25 points, tick value = $1.25
+    # 1 point = 4 ticks = $5.00 for MES
+    stop_loss_ticks: 8       # 8 ticks = 2 points = $10 per contract
+    take_profit_ticks: 16    # 16 ticks = 4 points = $20 per contract (2:1 R/R)
+    tick_size: 0.25          # MES minimum tick
+    tick_value: 1.25         # $ per tick for MES (ES is $12.50)
+    point_value: 5.0         # $ per full point for MES (ES is $50)
+    contract_cost: 1.25      # approx commission per side
+    max_contracts: 10        # micro contracts - can trade more than ES
+    risk_per_trade_pct: 0.01 # 1% account risk per trade
     max_drawdown_pct: 0.2
     daily_loss_limit: 0.05
   training:

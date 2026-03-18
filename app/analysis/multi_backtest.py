@@ -1,286 +1,263 @@
 """
-Multi-parameter backtest validation suite with performance metrics.
+multi_backtest.py — Multi-parameter backtest sweep with visualization.
 
-This script runs multiple backtests with different configs and
-summarizes the results to evaluate model robustness.
+Runs a grid of EMA / RSI / volatility combinations and aggregates results.
+
+Usage:
+    python -m app.analysis.multi_backtest
+    python -m app.analysis.multi_backtest --compare-retrain
 """
 
 import itertools
-import logging
 import os
 import glob
-import pandas as pd
-import joblib
-import numpy as np
-import matplotlib.pyplot as plt
 import argparse
+from datetime import datetime, timezone
 
-from datetime import datetime
+import numpy as np
+import pandas as pd
+import matplotlib
+matplotlib.use("Agg")   # non-interactive backend — safe on headless machines
+import matplotlib.pyplot as plt
+import joblib
+
 from app.config import load_config
 from app.data.simulator import stream_bars
 from app.backtest.backtester import Backtester
 from app.monitor.logger import get_logger
 from app.db import get_session
 from app.models.schema import Metric
-from app.ml.training import retrain_on_recent
-
-# === Ensure output folder exists ===
-ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-OUT_DIR = os.path.join(ROOT_DIR, "data", "multi_backtests")
-os.makedirs(OUT_DIR, exist_ok=True)
-
-# Logging setup
-logger = logging.getLogger(__name__)
-if not logger.handlers:
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
 logger = get_logger(__name__)
-cfg = load_config()
+cfg    = load_config()
 
-# === Parameter grid for testing ===
-EMA_SHORTS = [8, 12, 16]
-EMA_LONGS = [20, 26, 32]
-RSI_PERIODS = [10, 14, 18]
-VOLATILITIES = [0.0006, 0.0008, 0.0010]
-
-OUT_DIR = os.path.join(os.getcwd(), "data", "multi_backtests")
+ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+OUT_DIR  = os.path.join(ROOT_DIR, "data", "multi_backtests")
 os.makedirs(OUT_DIR, exist_ok=True)
 
+# ── Parameter grid ────────────────────────────────────────────────────────────
+EMA_SHORTS   = [8,  12, 16]
+EMA_LONGS    = [20, 26, 32]
+RSI_PERIODS  = [10, 14, 18]
+VOLATILITIES = [0.0006, 0.0008, 0.0010]
 
-def calculate_ratios(pnl_series):
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _calculate_ratios(equity_curve: list):
     """
-    Compute Sharpe and Sortino ratios from PnL series.
+    Compute annualised Sharpe and Sortino from an equity curve list.
+    Returns (sharpe, sortino) — both float, NaN if not computable.
     """
-    if pnl_series.empty:
+    if len(equity_curve) < 2:
         return np.nan, np.nan
 
-    returns = pnl_series.pct_change().dropna()
-    mean_ret = returns.mean()
-    std_ret = returns.std()
+    arr     = np.array(equity_curve, dtype=float)
+    returns = np.diff(arr) / (arr[:-1] + 1e-9)
+    mean_r  = np.mean(returns)
+    std_r   = np.std(returns)
+    ann     = np.sqrt(252 * 390)   # minute-bar annualisation factor
 
-    sharpe = (mean_ret / std_ret) * np.sqrt(252 * 24 * 60) if std_ret > 0 else np.nan
+    sharpe = float(mean_r / std_r * ann) if std_r > 0 else np.nan
 
-    downside = returns[returns < 0]
-    downside_std = downside.std()
-    sortino = (mean_ret / downside_std) * np.sqrt(252 * 24 * 60) if downside_std > 0 else np.nan
+    downside     = returns[returns < 0]
+    downside_std = np.std(downside) if len(downside) > 1 else 0.0
+    sortino = float(mean_r / downside_std * ann) if downside_std > 0 else np.nan
 
     return sharpe, sortino
 
 
-def run_single_backtest(ema_short, ema_long, rsi_period, volatility):
-    """Run a single backtest with given parameters."""
-    logger.info(f"Running backtest: EMA({ema_short},{ema_long}) RSI({rsi_period}) Vol={volatility}")
-
-    # Update config for this run
-    cfg["model"]["features"]["ema_short"] = ema_short
-    cfg["model"]["features"]["ema_long"] = ema_long
-    cfg["model"]["features"]["rsi"] = rsi_period
-    cfg["simulator"]["volatility"] = volatility
-
-    # Generate simulated bars
-    bars = list(stream_bars(symbol=cfg["symbol"], minutes=1440, fast=True, seed=42, volatility=volatility))
-    df = pd.DataFrame(bars)
-
-    # Run backtest
-    bt = Backtester(cfg)
-    results = bt.run(df)
-    pnl_series = results.get("pnl_series", pd.Series(dtype=float))
-
-    sharpe, sortino = calculate_ratios(pnl_series)
-
-    results["ema_short"] = ema_short
-    results["ema_long"] = ema_long
-    results["rsi"] = rsi_period
-    results["volatility"] = volatility
-    results["sharpe"] = sharpe
-    results["sortino"] = sortino
-
-    # Save results
-    out_path = os.path.join(OUT_DIR, f"bt_{ema_short}_{ema_long}_{rsi_period}_{volatility}.pkl")
-    joblib.dump(results, out_path)
-    logger.info(f"Saved: {out_path}")
-
-    # Log to DB (optional)
+def _log_to_db(win_rate: float, label: str):
     try:
         with get_session() as s:
             s.add(Metric(
-                name="multi_backtest",
-                value=results.get("win_rate", 0),
-                timestamp=datetime.utcnow(),
-                meta=f"{ema_short},{ema_long},{rsi_period},{volatility}",
+                name      = "multi_backtest",
+                value     = win_rate,
+                timestamp = datetime.now(timezone.utc),
+                meta      = {"label": label},
             ))
             s.commit()
     except Exception as e:
-        logger.warning(f"Could not log to DB: {e}")
+        logger.warning("DB log failed: %s", e)
 
+
+# ── Single run ────────────────────────────────────────────────────────────────
+
+def run_single_backtest(ema_short, ema_long, rsi_period, volatility):
+    """Run one backtest configuration.  Returns the results dict."""
+    label = f"EMA({ema_short},{ema_long}) RSI({rsi_period}) Vol={volatility}"
+    logger.info("Running backtest: %s", label)
+
+    # Shallow-copy cfg so grid changes don't bleed between runs
+    import copy
+    run_cfg = copy.deepcopy(cfg)
+    run_cfg["model"]["features"]["ema_short"] = ema_short
+    run_cfg["model"]["features"]["ema_long"]  = ema_long
+    run_cfg["model"]["features"]["rsi"]       = rsi_period
+    run_cfg["simulator"]["volatility"]        = volatility
+
+    bars = list(stream_bars(
+        symbol     = run_cfg.get("symbol", "MES"),
+        minutes    = 1440,
+        fast       = True,
+        seed       = 42,
+        volatility = volatility,
+    ))
+    df = pd.DataFrame(bars)
+
+    bt      = Backtester(run_cfg)
+    results = bt.run(df)
+
+    sharpe, sortino = _calculate_ratios(results.get("equity_curve", []))
+
+    results.update({
+        "ema_short":  ema_short,
+        "ema_long":   ema_long,
+        "rsi":        rsi_period,
+        "volatility": volatility,
+        "sharpe":     sharpe,
+        "sortino":    sortino,
+        "total_pnl":  results["equity_curve"][-1] - results["equity_curve"][0]
+                      if results.get("equity_curve") else 0.0,
+    })
+
+    out_path = os.path.join(OUT_DIR, f"bt_{ema_short}_{ema_long}_{rsi_period}_{volatility}.pkl")
+    joblib.dump(results, out_path)
+    logger.info("Saved: %s", out_path)
+
+    _log_to_db(results.get("win_rate", 0.0), label)
     return results
 
 
-def aggregate_results(all_results):
-    """Aggregate all test results, handle missing fields gracefully, and visualize."""
-    import numpy as np
+# ── Aggregation & visualisation ───────────────────────────────────────────────
+
+def aggregate_results(all_results: list):
+    """Aggregate results list, save summary CSV, and produce charts."""
+    if not all_results:
+        logger.error("No backtest results to aggregate.")
+        return pd.DataFrame()
 
     df = pd.DataFrame(all_results)
-    if df.empty:
-        logger.error("No backtest results found!")
-        return
 
-    logger.info(f"Aggregating {len(df)} backtest result entries...")
-
-    # === Handle missing columns safely ===
-    expected_cols = [
-        "ema_short",
-        "ema_long",
-        "rsi",
-        "volatility",
-        "win_rate",
-        "max_drawdown",
-        "total_pnl",
-        "sharpe",
-        "sortino"
-    ]
-
-    for col in expected_cols:
+    expected = ["ema_short", "ema_long", "rsi", "volatility",
+                "win_rate", "max_drawdown", "total_pnl", "sharpe", "sortino"]
+    for col in expected:
         if col not in df.columns:
-            logger.warning(f"Missing column '{col}' in results — filling with NaN.")
             df[col] = np.nan
 
-    # === Save summary CSV ===
-    summary = df[expected_cols]
+    summary      = df[expected]
     summary_path = os.path.join(OUT_DIR, "summary.csv")
     summary.to_csv(summary_path, index=False)
-    logger.info(f"Saved summary CSV to: {summary_path}")
+    logger.info("Summary saved: %s", summary_path)
 
-    # === Visualization Section ===
     try:
-        # Risk-adjusted performance
-        plt.figure(figsize=(10, 6))
-        plt.scatter(
-            df["sharpe"],
-            df["sortino"],
-            c=df["win_rate"],
-            cmap="viridis",
-            s=100,
-            edgecolor="k"
-        )
-        plt.xlabel("Sharpe Ratio")
-        plt.ylabel("Sortino Ratio")
-        plt.title("Risk-Adjusted Performance Across Configurations")
-        plt.colorbar(label="Win Rate")
-        plt.grid(True)
-        plt.tight_layout()
-        plt.savefig(os.path.join(OUT_DIR, "risk_adjusted_performance.png"))
-        logger.info("Saved: risk_adjusted_performance.png")
-
-        # Win rate vs volatility
-        plt.figure(figsize=(10, 6))
-        for vol, sub in df.groupby("volatility"):
-            plt.plot(sub["ema_short"], sub["win_rate"], marker="o", label=f"Vol {vol}")
-        plt.xlabel("EMA Short Period")
-        plt.ylabel("Win Rate")
-        plt.title("Win Rate Across EMA Periods and Volatility Levels")
-        plt.legend()
-        plt.grid(True)
-        plt.tight_layout()
-        plt.savefig(os.path.join(OUT_DIR, "win_rate_comparison.png"))
-        logger.info("Saved: win_rate_comparison.png")
-
-        # PnL vs Sharpe
-        plt.figure(figsize=(10, 6))
-        plt.scatter(
-            df["total_pnl"],
-            df["sharpe"],
-            c=df["volatility"],
-            cmap="coolwarm",
-            s=80,
-            edgecolor="k"
-        )
-        plt.xlabel("Total PnL")
-        plt.ylabel("Sharpe Ratio")
-        plt.title("PnL vs Sharpe (colored by volatility)")
-        plt.colorbar(label="Volatility")
-        plt.grid(True)
-        plt.tight_layout()
-        plt.savefig(os.path.join(OUT_DIR, "pnl_vs_sharpe.png"))
-        logger.info("Saved: pnl_vs_sharpe.png")
-
+        _plot_results(df)
     except Exception as e:
-        logger.error(f"Visualization failed: {e}")
+        logger.warning("Visualisation failed: %s", e)
 
-    logger.info("Aggregation and visualization complete.")
     return summary
 
 
+def _plot_results(df: pd.DataFrame):
+    """Generate three performance charts."""
+    # 1. Sharpe vs Sortino scatter
+    fig, ax = plt.subplots(figsize=(10, 6))
+    sc = ax.scatter(df["sharpe"], df["sortino"],
+                    c=df["win_rate"], cmap="viridis", s=100, edgecolor="k")
+    plt.colorbar(sc, ax=ax, label="Win Rate")
+    ax.set_xlabel("Sharpe Ratio")
+    ax.set_ylabel("Sortino Ratio")
+    ax.set_title("Risk-Adjusted Performance Across Configurations")
+    ax.grid(True)
+    plt.tight_layout()
+    plt.savefig(os.path.join(OUT_DIR, "risk_adjusted_performance.png"), dpi=150)
+    plt.close(fig)
+
+    # 2. Win rate vs EMA short, grouped by volatility
+    fig, ax = plt.subplots(figsize=(10, 6))
+    for vol, sub in df.groupby("volatility"):
+        ax.plot(sub["ema_short"], sub["win_rate"], marker="o", label=f"Vol {vol}")
+    ax.set_xlabel("EMA Short Period")
+    ax.set_ylabel("Win Rate")
+    ax.set_title("Win Rate vs EMA Period by Volatility")
+    ax.legend()
+    ax.grid(True)
+    plt.tight_layout()
+    plt.savefig(os.path.join(OUT_DIR, "win_rate_comparison.png"), dpi=150)
+    plt.close(fig)
+
+    # 3. PnL vs Sharpe
+    fig, ax = plt.subplots(figsize=(10, 6))
+    sc = ax.scatter(df["total_pnl"], df["sharpe"],
+                    c=df["volatility"], cmap="coolwarm", s=80, edgecolor="k")
+    plt.colorbar(sc, ax=ax, label="Volatility")
+    ax.set_xlabel("Total PnL")
+    ax.set_ylabel("Sharpe Ratio")
+    ax.set_title("PnL vs Sharpe (coloured by volatility)")
+    ax.grid(True)
+    plt.tight_layout()
+    plt.savefig(os.path.join(OUT_DIR, "pnl_vs_sharpe.png"), dpi=150)
+    plt.close(fig)
+
+    logger.info("Charts saved to %s", OUT_DIR)
+
+
+# ── Retrain comparison ────────────────────────────────────────────────────────
 
 def compare_retrain_vs_baseline():
-    """
-    Compare baseline vs retrained model performance based on stored backtest results.
-    This version ensures missing columns like total_pnl are handled gracefully.
-    """
-    base_dir = os.path.join("data", "multi_backtests")
-    files = glob.glob(os.path.join(base_dir, "*.pkl"))
-
+    """Load all pkl files in multi_backtests/ and print a comparison table."""
+    files = glob.glob(os.path.join(OUT_DIR, "*.pkl"))
     if not files:
-        print("[WARN] No backtest files found in", base_dir)
+        print(f"[WARN] No backtest files found in {OUT_DIR}")
         return
 
-    results = []
+    rows = []
     for f in files:
         try:
-            data = pd.read_pickle(f)
-
-            # Some backtest results might be dicts, others DataFrames
+            data = joblib.load(f)
             if isinstance(data, dict):
-                df = pd.DataFrame([data])
+                row = data
             elif isinstance(data, pd.DataFrame):
-                df = data
+                row = data.iloc[0].to_dict() if len(data) else {}
             else:
-                print(f"[WARN] Unsupported data type in {f}: {type(data)}")
                 continue
 
-            # Add model version if missing
-            if "model_version" not in df.columns:
-                df["model_version"] = os.path.basename(f).replace(".pkl", "")
+            row.setdefault("model_version", os.path.basename(f).replace(".pkl", ""))
 
-            # Handle missing total_pnl column
-            if "total_pnl" not in df.columns:
-                if "pnl" in df.columns:
-                    df["total_pnl"] = df["pnl"].sum()
-                elif "pnl_series" in df.columns:
-                    df["total_pnl"] = sum(df["pnl_series"])
-                else:
-                    df["total_pnl"] = 0.0  # fallback
+            eq = row.get("equity_curve", [])
+            if "total_pnl" not in row:
+                row["total_pnl"] = (eq[-1] - eq[0]) if len(eq) >= 2 else 0.0
 
-            # Add missing optional metrics
             for col in ["win_rate", "max_drawdown", "sharpe", "sortino"]:
-                if col not in df.columns:
-                    df[col] = None
+                row.setdefault(col, None)
 
-            results.append(df)
+            rows.append(row)
         except Exception as e:
-            print(f"[ERROR] Failed to process {f}: {e}")
+            print(f"[ERROR] {f}: {e}")
 
-    if not results:
+    if not rows:
         print("[WARN] No valid results loaded.")
         return
 
-    df = pd.concat(results, ignore_index=True)
-
-    # Only select columns that exist
-    keep_cols = [c for c in ["model_version", "total_pnl", "win_rate", "max_drawdown", "sharpe", "sortino"] if c in df.columns]
-    df = df[keep_cols]
+    df   = pd.DataFrame(rows)
+    keep = [c for c in ["model_version", "total_pnl", "win_rate",
+                         "max_drawdown", "sharpe", "sortino"] if c in df.columns]
+    df   = df[keep]
 
     print("\n=== Model Comparison Summary ===")
-    print(df)
+    print(df.to_string(index=False))
 
-    summary_path = os.path.join(base_dir, "comparison_summary.csv")
-    df.to_csv(summary_path, index=False)
-    print(f"\n[INFO] Saved comparison summary to {summary_path}")
+    out = os.path.join(OUT_DIR, "comparison_summary.csv")
+    df.to_csv(out, index=False)
+    print(f"\n[INFO] Saved comparison to {out}")
 
+
+# ── Entrypoint ────────────────────────────────────────────────────────────────
 
 def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--compare-retrain", action="store_true", help="Compare retrained vs baseline model performance")
+    parser = argparse.ArgumentParser(description="Multi-parameter backtest sweep")
+    parser.add_argument("--compare-retrain", action="store_true",
+                        help="Compare stored backtest results instead of running new ones")
     args = parser.parse_args()
 
     if args.compare_retrain:
@@ -288,13 +265,15 @@ def main():
         return
 
     all_results = []
-
-    for ema_short, ema_long, rsi, vol in itertools.product(EMA_SHORTS, EMA_LONGS, RSI_PERIODS, VOLATILITIES):
+    for ema_short, ema_long, rsi, vol in itertools.product(
+        EMA_SHORTS, EMA_LONGS, RSI_PERIODS, VOLATILITIES
+    ):
         try:
             res = run_single_backtest(ema_short, ema_long, rsi, vol)
             all_results.append(res)
         except Exception as e:
-            logger.error(f"Backtest failed for config {ema_short},{ema_long},{rsi},{vol}: {e}")
+            logger.error("Backtest failed (%s,%s,%s,%s): %s",
+                         ema_short, ema_long, rsi, vol, e)
 
     aggregate_results(all_results)
 

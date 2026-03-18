@@ -47,7 +47,9 @@ def execute_trade(bar, signal: Dict, config: Dict):
         return None
     size = min(config["risk"]["max_contracts"], max(1, int(config["risk"]["max_contracts"] * 1)))
     price = float(bar["close"])
-    fill_price, slip = simulate_fill(price, signal["side"], size, slippage_std=0.1)
+    # Normalize BUY/SELL to LONG/SHORT for simulate_fill
+    fill_side = "LONG" if signal["side"] == "BUY" else "SHORT"
+    fill_price, slip = simulate_fill(price, fill_side, size, slippage_std=0.1)
     commission = config["risk"]["contract_cost"] * size
     return {
         "timestamp": bar["timestamp"],
@@ -64,7 +66,9 @@ def exit_with_sl_tp(entry_trade: Dict, next_bar, cfg: Dict):
     Decide exit using next bar high/low for SL/TP; else exit at next close.
     """
     entry = entry_trade["price"]
-    side = entry_trade["side"]
+    raw_side = entry_trade["side"]
+    # Normalize BUY/SELL -> LONG/SHORT for _apply_sl_tp
+    side = "LONG" if raw_side in ("BUY", "LONG") else "SHORT"
     tick_value = cfg["risk"]["tick_value"]
     stop_ticks = cfg["risk"]["stop_loss_ticks"]
     tp_ticks = cfg["risk"]["take_profit_ticks"]

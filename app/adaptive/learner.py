@@ -1,30 +1,15 @@
 """
-Module: learner.py
-Author: Adaptive Framework Generator
-
-Description:
-    Offline reinforcement-learning system (REINFORCE) for optimizing
-    trading strategies based on historical trade performance. This module
-    integrates with the database, model hub, and reward engine.
-
-Features:
-    - Medium-capacity policy network (128→64 hidden layers)
-    - REINFORCE policy gradient updates
-    - Batch reward computation via reward.py
-    - Offline training using stored trade metrics
-    - Versioned RL model persistence using ModelHub
-    - APScheduler + CLI-compatible training entrypoints
+learner.py — Offline REINFORCE policy gradient learner.
 """
 
 import torch
 import torch.nn as nn
 import torch.optim as optim
+from datetime import datetime, timezone
 from torch.distributions import Categorical
 
-from sqlalchemy.orm import Session
-from app.db.init import get_engine
-from app.db.schema import TradeMetric
-
+from app.db.init import get_engine, get_session
+from app.models.schema import TradeMetric
 from app.monitor.logger import get_logger
 from .reward import compute_batch_reward
 from .model_hub import ModelHub
@@ -32,16 +17,10 @@ from .model_hub import ModelHub
 logger = get_logger(__name__)
 
 
-# ===================================================================
-# POLICY NETWORK
-# ===================================================================
-
 class PolicyNet(nn.Module):
-    """
-    Medium-capacity policy network:
-        Input → 128 → 64 → Output(3 actions)
-    """
-    def __init__(self, feature_dim, n_actions=3):
+    """128 -> 64 -> 3-action softmax policy."""
+
+    def __init__(self, feature_dim: int, n_actions: int = 3):
         super().__init__()
         self.net = nn.Sequential(
             nn.Linear(feature_dim, 128),
@@ -49,146 +28,105 @@ class PolicyNet(nn.Module):
             nn.Linear(128, 64),
             nn.ReLU(),
             nn.Linear(64, n_actions),
-            nn.Softmax(dim=-1)
+            nn.Softmax(dim=-1),
         )
 
     def forward(self, x):
         return self.net(x)
 
 
-# ===================================================================
-# REINFORCEMENT LEARNER (Offline Training)
-# ===================================================================
-
 class ReinforcementLearner:
-    """
-    Offline reinforcement-learning engine using policy-gradient (REINFORCE).
-    """
+    """Offline REINFORCE learner using trade history from the DB."""
 
-    def __init__(self, feature_dim, lr=1e-4, gamma=0.99,
-                 model_name="adaptive_policy"):
-        self.policy = PolicyNet(feature_dim)
-        self.optimizer = optim.Adam(self.policy.parameters(), lr=lr)
-        self.gamma = gamma
+    def __init__(
+        self,
+        feature_dim: int  = 4,
+        lr:          float = 1e-4,
+        gamma:       float = 0.99,
+        model_name:  str   = "adaptive_policy",
+    ):
+        self.policy     = PolicyNet(feature_dim)
+        self.optimizer  = optim.Adam(self.policy.parameters(), lr=lr)
+        self.gamma      = gamma
         self.model_name = model_name
-        self.hub = ModelHub()
-        self.engine = get_engine()
+        self.hub        = ModelHub()
+        logger.info("ReinforcementLearner ready | feature_dim=%d lr=%s", feature_dim, lr)
 
-        logger.info(f"Adaptive RL initialized: feature_dim={feature_dim}, lr={lr}")
-
-    # ----------------------------------------------------------------------
-    # SAVE AND LOAD POLICY
-    # ----------------------------------------------------------------------
-
-    def save_policy(self, reward=None):
-        """Persist policy network via ModelHub."""
-        metrics = {"reward": reward}
+    def save_policy(self, reward: float = None):
         self.hub.save_model(
-            model=self.policy,
-            model_name=self.model_name,
-            model_type="RLPolicy",
-            metrics=metrics
+            model      = self.policy,
+            model_name = self.model_name,
+            model_type = "RLPolicy",
+            metrics    = {"reward": reward},
         )
-        logger.info("ReinforcementLearner: policy saved successfully.")
+        logger.info("Policy saved (reward=%.4f).", reward or 0)
 
     def load_latest_policy(self):
-        """Load latest saved policy parameters."""
         state = self.hub.load_model(self.model_name, model_type="RLPolicy")
-        if state:
-            self.policy.load_state_dict(state)
-            logger.info("ReinforcementLearner: loaded latest policy.")
+        if state is not None:
+            try:
+                self.policy.load_state_dict(state)
+                logger.info("Loaded latest policy from ModelHub.")
+            except Exception as e:
+                logger.warning("Could not load policy state dict: %s", e)
         else:
-            logger.warning("ReinforcementLearner: no saved policy found; starting fresh.")
+            logger.info("No saved policy found — starting fresh.")
 
-    # ----------------------------------------------------------------------
-    # POLICY UPDATE (REINFORCE)
-    # ----------------------------------------------------------------------
-
-    def update_policy(self, log_probs, reward):
-        """
-        Perform REINFORCE update:
-            loss = -log(pi(a|s)) * reward
-        """
+    def update_policy(self, log_probs: list, reward: float) -> float:
         loss = torch.stack([-lp * reward for lp in log_probs]).sum()
-
         self.optimizer.zero_grad()
         loss.backward()
         self.optimizer.step()
-
         return float(loss.item())
 
-    # ----------------------------------------------------------------------
-    # OFFLINE TRAIN FROM TRADE HISTORY
-    # ----------------------------------------------------------------------
-
-    def train_from_history(self, episodes=5):
+    def train_from_history(self, episodes: int = 5):
         """
-        Offline training loop that:
-            - pulls trade results from DB
-            - computes risk-adjusted reward
-            - applies REINFORCE updates
-            - saves versioned policy to DB/model hub
+        Pull trade PnL from DB and run REINFORCE updates.
+        All DB attribute access happens inside the session to avoid
+        DetachedInstanceError.
         """
+        logger.info("RL offline training: %d episodes", episodes)
 
-        logger.info(f"ReinforcementLearner: offline training started ({episodes} episodes)")
-
-        # -------------------------------
-        # Load trade performance data
-        # -------------------------------
-        session = Session(self.engine)
-        rows = session.query(TradeMetric).order_by(TradeMetric.id.asc()).all()
-        session.close()
-
-        if not rows or len(rows) < 20:
-            logger.warning("RL: insufficient trade history for update.")
+        # Read all values INSIDE the session before it closes
+        try:
+            with get_session() as s:
+                rows = (
+                    s.query(TradeMetric)
+                     .order_by(TradeMetric.id.asc())
+                     .all()
+                )
+                # Extract primitive values while session is still open
+                trade_pnls = [float(r.pnl) for r in rows]
+                n_rows     = len(rows)
+        except Exception as e:
+            logger.error("Could not load trade history: %s", e)
             return None
 
-        trade_pnls = [float(r.pnl) for r in rows]
-        wins = sum(1 for r in rows if r.pnl > 0)
-        win_rate = wins / len(rows)
+        if n_rows < 20:
+            logger.warning("RL: only %d trades in DB — need >=20.", n_rows)
+            return None
 
-        reward = compute_batch_reward(trade_pnls, win_rate)
-        logger.info(f"RL session reward: {reward:.4f}")
+        win_rate = sum(1 for p in trade_pnls if p > 0) / n_rows
+        reward   = compute_batch_reward(trade_pnls, win_rate)
+        logger.info("RL reward: %.4f  win_rate=%.2f  trades=%d",
+                    reward, win_rate, n_rows)
 
-        # -------------------------------
-        # Offline RL training episodes
-        # -------------------------------
+        pnl_t = torch.tensor(trade_pnls, dtype=torch.float32)
+        state = torch.tensor(
+            [float(pnl_t.mean()), float(pnl_t.std()), win_rate, reward],
+            dtype=torch.float32,
+        ).unsqueeze(0)
+
         all_losses = []
-
         for ep in range(episodes):
-            log_probs = []
-
-            # create synthetic "state" from PnL distribution features
-            # these are low-dimensional state approximations
-            pnl_tensor = torch.tensor([
-                float(torch.mean(torch.tensor(trade_pnls))),
-                float(torch.std(torch.tensor(trade_pnls))),
-                win_rate,
-                reward
-            ], dtype=torch.float32).unsqueeze(0)
-
-            # forward pass
-            probs = self.policy(pnl_tensor)
-            dist = Categorical(probs)
-            action = dist.sample()
+            probs    = self.policy(state)
+            dist     = Categorical(probs)
+            action   = dist.sample()
             log_prob = dist.log_prob(action)
-            log_probs.append(log_prob)
-
-            # update policy
-            loss = self.update_policy(log_probs, reward)
+            loss     = self.update_policy([log_prob], reward)
             all_losses.append(loss)
+            logger.info("RL episode %d/%d  loss=%.6f", ep + 1, episodes, loss)
 
-            logger.info(f"RL Episode {ep+1}/{episodes} — Loss={loss:.6f}")
-
-        # -------------------------------
-        # Save model version
-        # -------------------------------
         self.save_policy(reward=reward)
-        logger.info("ReinforcementLearner: offline training complete.")
-
-        return {
-            "reward": reward,
-            "losses": all_losses,
-            "episodes": episodes
-        }
-
+        logger.info("RL offline training complete.")
+        return {"reward": reward, "losses": all_losses, "episodes": episodes}

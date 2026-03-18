@@ -23,9 +23,7 @@ import time
 import datetime
 import platform
 import subprocess
-import logging
 from pathlib import Path
-from statistics import mean
 from ..monitor.logger import get_logger
 
 logger = get_logger(__name__)
@@ -171,19 +169,19 @@ def detect_regressions(oipr, deltas):
     findings = []
 
     if deltas["accuracy_delta"] < -0.02:
-        findings.append("⚠️ Model accuracy has decreased significantly.")
+        findings.append("[WARN] Model accuracy has decreased significantly.")
     elif deltas["accuracy_delta"] > 0.02:
-        findings.append("✅ Model accuracy has improved.")
+        findings.append("[OK] Model accuracy has improved.")
 
     if oipr["test_summary"]["failed"] > 0:
-        findings.append("❌ One or more tests failed.")
+        findings.append("[FAIL] One or more tests failed.")
     elif deltas["integrity_delta"] < 0:
-        findings.append("⚠️ Integrity score declined slightly.")
+        findings.append("[WARN] Integrity score declined slightly.")
     else:
-        findings.append("✅ All systems performing as expected.")
+        findings.append("[OK] All systems performing as expected.")
 
     if oipr.get("anomaly_count", 0) > 0:
-        findings.append(f"⚠️ {oipr['anomaly_count']} runtime anomaly(s) detected in logs.")
+        findings.append(f"[WARN] {oipr['anomaly_count']} runtime anomaly(s) detected in logs.")
 
     return findings
 

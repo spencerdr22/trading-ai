@@ -4,9 +4,9 @@ import os
 import joblib
 import pandas as pd
 from sklearn.ensemble import RandomForestClassifier
-from app.data.live_feed import get_last_n_bars
+from app.data.loader import load_sample
 
-MODEL_DIR = os.path.join(os.getcwd(), "models")
+MODEL_DIR = os.path.join(os.getcwd(), "data", "models")
 os.makedirs(MODEL_DIR, exist_ok=True)
 
 MODEL_FILE = os.path.join(MODEL_DIR, "trade_model.pkl")
@@ -22,14 +22,13 @@ def save_model(model):
 # ---------------------------
 # Option A: Incremental Retraining
 # ---------------------------
-def retrain_on_recent(n_bars=1440):  # ~1 trading day of 1m bars
-    df = get_last_n_bars(n_bars)
-
-    if len(df) < 20:
+def retrain_on_recent(n_bars=1440):
+    df = load_sample()
+    if df is None or len(df) < 20:
         print("[WARN] Not enough data to retrain.")
         return
+    df = df.tail(n_bars).copy()
 
-    # Example labels (dummy: price up = 1, down = 0)
     df["target"] = (df["close"].shift(-1) > df["close"]).astype(int)
     X = df[["open", "high", "low", "close", "volume"]][:-1]
     y = df["target"][:-1]
@@ -46,9 +45,8 @@ def retrain_on_recent(n_bars=1440):  # ~1 trading day of 1m bars
 def rebuild_model():
     """
     Full retraining from all available history.
-    Uncomment when ready.
     """
-    df = get_last_n_bars(10000)  # fetch more history
+    df = load_sample()  # fetch all available history
     if len(df) < 100:
         print("[WARN] Not enough data to rebuild model.")
         return

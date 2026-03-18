@@ -29,7 +29,7 @@ def load_sample(min_rows: int = 500, target_rows: int = 1440) -> pd.DataFrame:
     # === Generate synthetic dataset ===
     now = datetime.utcnow()
     timestamps = [now - timedelta(minutes=i) for i in range(target_rows)][::-1]
-    price = np.cumsum(np.random.randn(target_rows)) + 4200
+    price = np.cumsum(np.random.randn(target_rows) * 0.5) + 5750  # MES ~5700-5900 range
     df = pd.DataFrame({
         "timestamp": timestamps,
         "open": price + np.random.randn(target_rows) * 0.5,

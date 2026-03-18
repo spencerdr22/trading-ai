@@ -11,13 +11,13 @@ os.makedirs(DATA_DIR, exist_ok=True)
 DATA_FILE = os.path.join(DATA_DIR, "sp500_mini.csv")
 
 API_KEY = os.getenv("ALPACA_API_KEY")
-API_SECRET = os.getenv("ALPACA_API_SECRET")
+API_SECRET = os.getenv("ALPACA_SECRET_KEY")  # fixed: was ALPACA_API_SECRET
 BASE_URL = "https://data.alpaca.markets/v2"
 
 # ---------------------------
 # Fetch Historical Data
 # ---------------------------
-def fetch_week_snapshot(symbol="MES=F", timeframe="1Min", days=5):
+def fetch_week_snapshot(symbol="SPY", timeframe="1Min", days=5):  # SPY proxy for MES via Alpaca
     """
     Fetch last `days` worth of historical bars (default 5 days, 1m bars).
     """
@@ -68,3 +68,26 @@ def get_last_n_bars(n=100):
     if df.empty:
         return pd.DataFrame()
     return df.tail(n)
+
+
+class LiveFeed:
+    """
+    Stub live feed class.
+    Streams bars from Alpaca data API for the given symbol.
+    Requires a tradovate_client (or any client with place_order) for execution.
+    """
+
+    def __init__(self, symbol: str = "SPY", tradovate_client=None):
+        self.symbol   = symbol
+        self.client   = tradovate_client
+
+    async def stream(self):
+        """Async bar stream — placeholder for WebSocket integration."""
+        import asyncio
+        print(f"[LiveFeed] Streaming {self.symbol} (stub — no live WebSocket yet).")
+        while True:
+            bar = fetch_week_snapshot(symbol=self.symbol, days=1)
+            if not bar.empty and self.client:
+                latest = bar.iloc[-1].to_dict()
+                print(f"[LiveFeed] Latest bar: {latest}")
+            await asyncio.sleep(60)

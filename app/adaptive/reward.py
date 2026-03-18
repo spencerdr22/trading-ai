@@ -121,16 +121,25 @@ def compute_reward(
 
 
 # Convenience API for nightly batch processing
-def compute_batch_reward(trade_pnls, win_rate):
+def compute_batch_reward(
+    trade_pnls,
+    win_rate,
+    pnl_weight=0.5,
+    sharpe_weight=0.2,
+    sortino_weight=0.2,
+    dd_penalty_weight=0.3,
+    win_rate_weight=0.4,
+):
     """
     Computes a reward for the entire trading session.
+    Accepts optional weight overrides for Optuna hyperparameter search.
     """
     return compute_reward(
         pnl_series=trade_pnls,
         win_rate=win_rate,
-        pnl_weight=0.5,
-        sharpe_weight=0.2,
-        sortino_weight=0.2,
-        dd_penalty_weight=0.3,
-        win_rate_weight=0.4,
+        pnl_weight=pnl_weight,
+        sharpe_weight=sharpe_weight,
+        sortino_weight=sortino_weight,
+        dd_penalty_weight=dd_penalty_weight,
+        win_rate_weight=win_rate_weight,
     )

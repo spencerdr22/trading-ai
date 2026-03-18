@@ -21,14 +21,16 @@ def log_system_status():
     config_summary = system_config.get_config_summary()
     
     logger.info(
-        f"📊 SYSTEM STATUS | "
-        f"Session: {config_summary['market_session']} | "
-        f"GPU: {config_summary['gpu_mode']} | "
-        f"CPU: {config_summary['cpu_load']}% | "
-        f"RAM: {config_summary['memory_usage']['percent']:.1f}% | "
-        f"Trading calls: {gpu_metrics['trading_calls']} | "
-        f"Analysis deferred: {gpu_metrics['analysis_deferred']} | "
-        f"Avg wait: {gpu_metrics['avg_wait_time_ms']:.2f}ms"
+        "SYSTEM STATUS | "
+        "Session: %s | GPU: %s | CPU: %s%% | RAM: %.1f%% | "
+        "Trading calls: %d | Analysis deferred: %d | Avg wait: %.2fms",
+        config_summary['market_session'],
+        config_summary['gpu_mode'],
+        config_summary['cpu_load'],
+        config_summary['memory_usage']['percent'],
+        gpu_metrics['trading_calls'],
+        gpu_metrics['analysis_deferred'],
+        gpu_metrics['avg_wait_time_ms'],
     )
 
 

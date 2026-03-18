@@ -1,204 +1,249 @@
-# File: app/monitor/dashboard.py
 """
-Streamlit dashboard to visualize backtest & forward/paper results.
-Auto-loads:
- - data/backtest_*.pkl      (joblib/pickled dict from backtests)
- - data/forward_<symbol>.csv
- - data/db_export_<symbol>.csv
+dashboard.py — Streamlit dashboard for Trading-AI
 
-Usage:
-  # from project root (with .venv activated)
-  streamlit run app/monitor/dashboard.py -- --symbol MES
+Shows backtest results, forward/paper trade history, live system
+status, and validation metrics.
+
+Run with:
+    streamlit run app/monitor/dashboard.py -- --symbol MES
 """
-import streamlit as st
+
 import os
+import sys
 import glob
+import json
 import pandas as pd
 import joblib
+import streamlit as st
 from datetime import datetime
 
 st.set_page_config(page_title="Trading-AI Dashboard", layout="wide")
 
-# CLI-like arg via Streamlit -> fallback to "MES"
-import sys
+# ── Symbol from CLI arg ───────────────────────────────────────────────────────
 _symbol = "MES"
 if "--symbol" in sys.argv:
     try:
         _symbol = sys.argv[sys.argv.index("--symbol") + 1]
-    except Exception:
+    except (IndexError, ValueError):
         pass
 
 DATA_DIR = os.path.abspath(os.path.join(os.getcwd(), "data"))
 os.makedirs(DATA_DIR, exist_ok=True)
 
-st.title("Trading-AI: Backtest & Forward Dashboard")
+# ── Sidebar ───────────────────────────────────────────────────────────────────
+st.title("Trading-AI: MES Dashboard")
 st.sidebar.header("Settings")
 symbol = st.sidebar.text_input("Symbol", value=_symbol)
-st.sidebar.markdown("Files auto-loaded from `data/` folder")
+st.sidebar.markdown("Files auto-loaded from `data/`")
+auto_refresh = st.sidebar.checkbox("Auto-refresh (30s)", value=False)
+if auto_refresh:
+    import time
+    time.sleep(30)
+    st.rerun()
 
-# Helper: load latest backtest pickle(s)
-def load_backtests(symbol: str):
-    pattern = os.path.join(DATA_DIR, f"multi_backtests", f"*{symbol}*.pkl")
-    # fallback pattern
+# ── Data loaders ──────────────────────────────────────────────────────────────
+
+def load_backtests(sym: str):
+    pattern = os.path.join(DATA_DIR, "multi_backtests", f"*{sym}*.pkl")
     if not glob.glob(pattern):
-        pattern = os.path.join(DATA_DIR, f"backtest_{symbol}.pkl")
-    files = sorted(glob.glob(pattern), key=os.path.getmtime, reverse=True)
+        pattern = os.path.join(DATA_DIR, f"backtest_{sym}.pkl")
+    files   = sorted(glob.glob(pattern), key=os.path.getmtime, reverse=True)
     results = []
     for f in files:
         try:
-            res = joblib.load(f)
-            # normalize some fields for display
-            res_meta = {
-                "file": os.path.basename(f),
-                "timestamp": datetime.fromtimestamp(os.path.getmtime(f)).isoformat(),
-                "win_rate": res.get("win_rate"),
+            res  = joblib.load(f)
+            eq   = res.get("equity_curve") or []
+            meta = {
+                "file":         os.path.basename(f),
+                "timestamp":    datetime.fromtimestamp(os.path.getmtime(f)).isoformat(),
+                "win_rate":     res.get("win_rate"),
                 "max_drawdown": res.get("max_drawdown"),
-                "total_pnl": res.get("equity_curve")[-1] if res.get("equity_curve") else None,
-                "trades": len(res.get("trades", [])),
+                "total_pnl":    eq[-1] if eq else None,
+                "trades":       len(res.get("trades", [])),
             }
-            results.append((f, res, res_meta))
+            results.append((f, res, meta))
         except Exception as e:
-            st.sidebar.error(f"Failed to load backtest file {f}: {e}")
+            st.sidebar.error(f"Could not load {os.path.basename(f)}: {e}")
     return results
 
-# Helper: load forward CSV and DB export
-def load_forward(symbol: str):
-    forward_file = os.path.join(DATA_DIR, f"forward_{symbol}.csv")
-    db_file = os.path.join(DATA_DIR, f"db_export_{symbol}.csv")
-    forward = pd.read_csv(forward_file, parse_dates=["timestamp"]) if os.path.exists(forward_file) else None
-    db = pd.read_csv(db_file, parse_dates=["timestamp"]) if os.path.exists(db_file) else None
-    return forward, db
 
-# Load data
-backtests = load_backtests(symbol)
+def load_forward(sym: str):
+    fwd_file = os.path.join(DATA_DIR, f"forward_{sym}.csv")
+    db_file  = os.path.join(DATA_DIR, f"db_export_{sym}.csv")
+    fwd = (pd.read_csv(fwd_file, parse_dates=["timestamp"])
+           if os.path.exists(fwd_file) else None)
+    db  = (pd.read_csv(db_file,  parse_dates=["timestamp"])
+           if os.path.exists(db_file)  else None)
+    return fwd, db
+
+
+# ── Load data ─────────────────────────────────────────────────────────────────
+backtests  = load_backtests(symbol)
 forward_df, db_df = load_forward(symbol)
 
-# Top-level summary
-col1, col2 = st.columns([2, 1])
-with col1:
-    st.header(f"Summary for {symbol}")
-    st.write(f"Data directory: `{DATA_DIR}`")
-    st.markdown(f"**Backtests found:** {len(backtests)}")
-    st.markdown(f"**Forward CSV:** {'Yes' if forward_df is not None else 'No'}")
-    st.markdown(f"**DB export:** {'Yes' if db_df is not None else 'No'}")
-
-with col2:
+# ── Summary header ────────────────────────────────────────────────────────────
+c1, c2 = st.columns([2, 1])
+with c1:
+    st.header(f"Symbol: {symbol}")
+    st.write(f"Data dir: `{DATA_DIR}`")
+    st.write(f"Backtests: {len(backtests)} | Forward CSV: {'yes' if forward_df is not None else 'no'} | DB export: {'yes' if db_df is not None else 'no'}")
+with c2:
     if backtests:
-        latest_meta = backtests[0][2]
-        st.metric("Latest backtest", latest_meta["file"])
-        st.metric("Win rate", latest_meta["win_rate"])
-        st.metric("Trades", latest_meta["trades"])
+        m = backtests[0][2]
+        st.metric("Latest backtest",  m["file"])
+        st.metric("Win rate",         f"{m['win_rate']:.2%}" if m["win_rate"] else "N/A")
+        st.metric("Trades",           m["trades"])
     else:
         st.info("No backtests found.")
 
-# Section: Backtest selector + equity curve
+# ── Backtests ─────────────────────────────────────────────────────────────────
 if backtests:
-    st.subheader("Backtest list")
-    # show a compact table of metadata
-    meta_rows = [m for (_, _, m) in backtests]
-    meta_df = pd.DataFrame(meta_rows)
-    st.dataframe(meta_df[["file", "timestamp", "win_rate", "max_drawdown", "total_pnl", "trades"]].fillna(""))
+    st.subheader("Backtest History")
+    meta_df = pd.DataFrame([m for (_, _, m) in backtests])
+    st.dataframe(
+        meta_df[["file", "timestamp", "win_rate", "max_drawdown", "total_pnl", "trades"]].fillna(""),
+        use_container_width=True,
+    )
 
-    sel = st.selectbox("Select backtest to visualize", [m["file"] for (_, _, m) in backtests])
+    sel     = st.selectbox("Select backtest to view", [m["file"] for (_, _, m) in backtests])
     sel_idx = next(i for i, t in enumerate(backtests) if t[2]["file"] == sel)
     _, sel_res, _ = backtests[sel_idx]
 
-    st.markdown("**Equity Curve (backtest)**")
-    if sel_res.get("equity_curve") is not None:
-        eq = sel_res["equity_curve"]
-        eq_df = pd.DataFrame({"equity": eq})
-        st.line_chart(eq_df["equity"])
+    eq = sel_res.get("equity_curve")
+    if eq:
+        st.line_chart(pd.DataFrame({"equity": eq}))
     else:
-        st.write("No equity curve in selected backtest.")
+        st.write("No equity curve available.")
 
-    st.markdown("**Trades (sample)**")
     trades = sel_res.get("trades", [])
     if trades:
-        trades_df = pd.DataFrame(trades)
-        st.dataframe(trades_df.head(200))
+        st.dataframe(pd.DataFrame(trades).head(200), use_container_width=True)
     else:
-        st.write("No trades recorded in this backtest.")
-
+        st.write("No trades in this backtest.")
 else:
-    st.info("No backtests available to show charts.")
+    st.info("No backtests available.")
 
-# Section: Forward run + DB export
+# ── Forward / Paper results ───────────────────────────────────────────────────
 st.subheader("Forward / Paper Results")
+
 if forward_df is not None:
-    st.markdown("**Forward CSV (latest)**")
-    st.dataframe(forward_df.head(500))
+    st.markdown("**Forward CSV**")
+    st.dataframe(forward_df.head(500), use_container_width=True)
     if "pnl" in forward_df.columns:
         st.line_chart(forward_df["pnl"].cumsum().rename("cumulative_pnl"))
-    st.download_button("Download forward CSV", forward_df.to_csv(index=False), file_name=f"forward_{symbol}.csv")
+
+    # Sentiment breakdown if column exists
+    if "sentiment" in forward_df.columns:
+        st.markdown("**Sentiment Distribution**")
+        counts = forward_df["sentiment"].value_counts()
+        st.bar_chart(counts)
+
+    st.download_button(
+        "Download forward CSV",
+        forward_df.to_csv(index=False),
+        file_name=f"forward_{symbol}.csv",
+    )
 else:
-    st.warning("No forward CSV found (forward_{symbol}.csv)")
+    st.warning(f"No forward CSV found: forward_{symbol}.csv")
 
 if db_df is not None:
     st.markdown("**DB Export**")
-    st.dataframe(db_df.head(500))
-    st.download_button("Download DB export CSV", db_df.to_csv(index=False), file_name=f"db_export_{symbol}.csv")
+    st.dataframe(db_df.head(500), use_container_width=True)
+    st.download_button(
+        "Download DB export",
+        db_df.to_csv(index=False),
+        file_name=f"db_export_{symbol}.csv",
+    )
 else:
-    st.info("No DB export file found (db_export_{symbol}.csv)")
+    st.info("No DB export found.")
 
-# Small diagnostics & quick checks
+# ── Quick diagnostics ─────────────────────────────────────────────────────────
 st.subheader("Quick Diagnostics")
-diag_col1, diag_col2 = st.columns(2)
-
-with diag_col1:
-    st.markdown("**Basic Checks**")
-    st.write(f"Backtests files: {len(backtests)}")
-    st.write(f"Forward CSV present: {forward_df is not None}")
-    st.write(f"DB export present: {db_df is not None}")
-
-with diag_col2:
-    st.markdown("**Recent metrics**")
+d1, d2 = st.columns(2)
+with d1:
+    st.write(f"Backtest files: {len(backtests)}")
+    st.write(f"Forward CSV: {forward_df is not None}")
+    st.write(f"DB export: {db_df is not None}")
+with d2:
     if backtests:
-        win_rates = [m["win_rate"] for (_, _, m) in backtests if m["win_rate"] is not None]
-        if win_rates:
-            st.write("Average win rate (backtests):", round(float(pd.Series(win_rates).mean()), 4))
+        rates = [m["win_rate"] for (_, _, m) in backtests if m["win_rate"] is not None]
+        if rates:
+            st.metric("Avg backtest win rate", f"{sum(rates)/len(rates):.2%}")
     if forward_df is not None and "pnl" in forward_df.columns:
-        st.write("Forward total PnL:", float(forward_df["pnl"].sum()))
+        st.metric("Forward total PnL", f"${forward_df['pnl'].sum():.2f}")
+
+# ── Live system status ────────────────────────────────────────────────────────
+st.subheader("Live System Status")
+try:
+    from app.llm.monitor import get_performance_report
+    report = get_performance_report()
+    gpu    = report["gpu_scheduler"]
+    syscfg = report["system_config"]
+    s1, s2, s3, s4 = st.columns(4)
+    s1.metric("Session",          syscfg["market_session"])
+    s2.metric("GPU Mode",         syscfg["gpu_mode"])
+    s3.metric("CPU",              f"{syscfg['cpu_load']}%")
+    s4.metric("RAM",              f"{syscfg['memory_usage']['percent']:.0f}%")
+    s1.metric("Trading calls",    gpu["trading_calls"])
+    s2.metric("Analysis deferred",gpu["analysis_deferred"])
+    s3.metric("Avg wait (ms)",    f"{gpu['avg_wait_time_ms']:.1f}")
+    s4.metric("GPU state",        gpu["current_task"])
+except Exception as e:
+    st.info(f"System monitor unavailable: {e}")
+
+# ── Validation results ────────────────────────────────────────────────────────
+st.subheader("Validation Results")
+
+wf_files = glob.glob(os.path.join(DATA_DIR, "validation", "walk_forward_*.json"))
+if wf_files:
+    with open(max(wf_files, key=os.path.getmtime)) as f:
+        wf = json.load(f)
+    st.markdown("**Walk-Forward**")
+    st.metric("Splits", wf.get("n_splits", wf.get("n_splits", "?")))
+    agg = wf.get("aggregated_metrics", {})
+    if agg:
+        v1, v2 = st.columns(2)
+        acc_data = agg.get("accuracy", {})
+        v1.metric("Avg Accuracy",  f"{acc_data.get('mean', 0):.2%}")
+        v2.metric("Stability",     agg.get("stability", {}).get("accuracy", "N/A"))
+else:
+    st.info("No walk-forward results found.")
+
+mc_files = glob.glob(os.path.join(DATA_DIR, "validation", "monte_carlo_*.json"))
+if mc_files:
+    with open(max(mc_files, key=os.path.getmtime)) as f:
+        mc = json.load(f)
+    st.markdown("**Monte Carlo**")
+    st.metric("Sequences", mc.get("n_sequences"))
+    sm = mc.get("summary_metrics", {})
+    if sm:
+        m1, m2, m3 = st.columns(3)
+        m1.metric("Exp. Sharpe",   f"{sm.get('sharpe', {}).get('mean', 0):.2f}")
+        m2.metric("Exp. Max DD",   f"{sm.get('max_drawdown', {}).get('mean', 0):.3f}")
+        sa = mc.get("stability_assessment", {})
+        m3.metric("Sharpe stable", sa.get("sharpe_stability", "N/A"))
+else:
+    st.info("No Monte Carlo results found.")
+
+# ── Pipeline metrics from DB ──────────────────────────────────────────────────
+st.subheader("Training Pipeline History")
+try:
+    from app.db.init import get_engine
+    from sqlalchemy import text
+    eng = get_engine()
+    with eng.connect() as conn:
+        rows = conn.execute(
+            text("SELECT name, value, timestamp FROM metrics "
+                 "WHERE name LIKE 'pipeline_%' "
+                 "ORDER BY timestamp DESC LIMIT 50")
+        ).fetchall()
+    if rows:
+        pipeline_df = pd.DataFrame(rows, columns=["metric", "value", "timestamp"])
+        st.dataframe(pipeline_df, use_container_width=True)
+    else:
+        st.info("No pipeline metrics in DB yet.")
+except Exception as e:
+    st.info(f"DB metrics unavailable: {e}")
 
 st.markdown("---")
-st.caption(f"Last updated: {datetime.utcnow().isoformat()} (UTC)")
-
-# Validation Results Section
-st.subheader("🔬 Validation Results")
-
-# Walk-forward results
-wf_files = glob.glob("data/validation/walk_forward_*.json")
-if wf_files:
-    latest_wf = max(wf_files, key=os.path.getmtime)
-    with open(latest_wf, 'r') as f:
-        wf_data = json.load(f)
-    
-    st.metric("Walk-Forward Splits", wf_data['n_splits'])
-    
-    if 'aggregated_metrics' in wf_data:
-        agg = wf_data['aggregated_metrics']
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            st.metric("Avg Accuracy", f"{agg.get('accuracy', {}).get('mean', 0):.2%}")
-        with col2:
-            st.metric("Stability", agg.get('stability', {}).get('accuracy', 'N/A'))
-
-# Monte Carlo results
-mc_files = glob.glob("data/validation/monte_carlo_*.json")
-if mc_files:
-    latest_mc = max(mc_files, key=os.path.getmtime)
-    with open(latest_mc, 'r') as f:
-        mc_data = json.load(f)
-    
-    st.metric("MC Sequences", mc_data['n_sequences'])
-    
-    if 'summary_metrics' in mc_data:
-        summary = mc_data['summary_metrics']
-        col1, col2, col3 = st.columns(3)
-        
-        with col1:
-            st.metric("Expected Sharpe", f"{summary['sharpe']['mean']:.2f}")
-        with col2:
-            st.metric("Expected Max DD", f"{summary['max_drawdown']['mean']:.2f}")
-        with col3:
-            st.metric("Sharpe Stability", summary.get('stability_assessment', {}).get('sharpe_stability', 'N/A'))
+st.caption(f"Last updated: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC")

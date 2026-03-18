@@ -41,11 +41,14 @@ def generate_walk_prices(
     })
     return df
 
+# MES current price range ~5700-5900 (March 2026)
+MES_DEFAULT_PRICE = 5750.0
+
 def stream_bars(
     symbol: str = "MES",
     minutes: int = 1440,
     fast: bool = False,
-    start_price: float = 1000.0,
+    start_price: float = MES_DEFAULT_PRICE,
     volatility: float = None,
     seed: Optional[int] = None,
 ) -> Generator[pd.Series, None, None]:

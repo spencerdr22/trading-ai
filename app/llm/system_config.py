@@ -325,7 +325,7 @@ class SystemConfig:
 # GLOBAL SINGLETON
 # ============================================================
 
-_system_config_instance: SystemConfig = None
+_system_config_instance: SystemConfig = None # type: ignore
 
 
 def get_system_config() -> SystemConfig:

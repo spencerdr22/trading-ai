@@ -4,7 +4,7 @@ import pickle
 from datetime import datetime
 import numpy as np
 
-MODEL_DIR = os.path.join(os.getcwd(), "models")
+MODEL_DIR = os.path.join(os.getcwd(), "data", "models")
 os.makedirs(MODEL_DIR, exist_ok=True)
 
 METRICS_LOG = os.path.join(MODEL_DIR, "metrics_log.csv")
