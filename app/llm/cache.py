@@ -14,8 +14,9 @@ logger = get_logger(__name__)
 CACHE_DIR = Path("data/llm_cache")
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
-# Cache expiration (news is time-sensitive)
-CACHE_TTL_HOURS = 24
+# Cache expiration — 45 minutes keeps sentiment fresh during the trading day
+# without hammering Qwen3 on every single refresh cycle
+CACHE_TTL_HOURS = 0.75  # 45 minutes
 
 
 class LLMCache:
