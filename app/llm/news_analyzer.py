@@ -1,6 +1,11 @@
 """
 news_analyzer.py — Qwen3-30B sentiment analysis via Ollama.
 
+Key fix: analysis_inference timeout raised to 120s so the lock is held
+for the full LLM call, not just the 5s acquisition window. Previously
+only 1 headline per batch was processed because the context manager
+exited after 5s while Qwen3 was still generating the response.
+
 All emoji stripped for Windows cp1252 compatibility.
 """
 
@@ -9,7 +14,7 @@ import re
 import pandas as pd
 from datetime import datetime, timezone
 from dataclasses import dataclass
-from typing import List, Dict, Optional
+from typing import List, Optional
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from ..monitor.logger import get_logger
@@ -22,17 +27,19 @@ logger = get_logger(__name__)
 DEFAULT_MODEL  = "qwen3:30b-a3b-q4_K_M"
 FALLBACK_MODEL = "qwen3:14b"
 
+# Minimum successful analyses before aggregation is trusted.
+# Below this threshold, return neutral to avoid single-headline bias.
+MIN_ANALYZED_FOR_SIGNAL = 3
 
-# ── Data structure ────────────────────────────────────────────────────────────
 
 @dataclass
 class SentimentSignal:
     headline:         str
     timestamp:        datetime
-    sentiment:        str   # bullish | bearish | neutral
+    sentiment:        str
     confidence:       float
     relevance:        float
-    urgency:          str   # low | medium | high
+    urgency:          str
     category:         str
     affected_symbols: List[str]
     key_entities:     List[str]
@@ -65,8 +72,6 @@ class SentimentSignal:
         return self.numeric_sentiment * self.confidence * self.relevance
 
 
-# ── Analyzer ─────────────────────────────────────────────────────────────────
-
 class NewsFlowAnalyzer:
     """LLM-powered news sentiment analysis using Qwen3 via Ollama."""
 
@@ -74,7 +79,7 @@ class NewsFlowAnalyzer:
         self,
         model:       str  = DEFAULT_MODEL,
         use_cache:   bool = True,
-        max_workers: int  = 8,
+        max_workers: int  = 4,   # reduced: Qwen3-30B is single-threaded on GPU
     ):
         self.model       = model
         self.use_cache   = use_cache
@@ -82,50 +87,44 @@ class NewsFlowAnalyzer:
         self._verify_model()
 
     def _verify_model(self):
-        """Check Ollama availability and select best model."""
         try:
             import ollama
             resp = ollama.list()
-            if hasattr(resp, "models"):
-                available = [m.model for m in resp.models]
-            elif isinstance(resp, dict):
-                available = [m.get("name", m.get("model", "")) for m in resp.get("models", [])]
-            else:
-                available = [str(m) for m in resp]
-
+            available = (
+                [m.model for m in resp.models]
+                if hasattr(resp, "models")
+                else [m.get("name", m.get("model", "")) for m in resp.get("models", [])]
+            )
             logger.info("Ollama available models: %s", available)
-
             if self.model not in available:
                 if FALLBACK_MODEL in available:
-                    logger.warning(
-                        "Model %s not found — using fallback %s.",
-                        self.model, FALLBACK_MODEL,
-                    )
+                    logger.warning("Model %s not found — using %s.", self.model, FALLBACK_MODEL)
                     self.model = FALLBACK_MODEL
                 else:
-                    logger.warning(
-                        "Neither %s nor %s found. Will attempt %s anyway.",
-                        self.model, FALLBACK_MODEL, self.model,
-                    )
+                    logger.warning("Neither primary nor fallback model found — will attempt anyway.")
             else:
                 logger.info("Using model: %s", self.model)
         except Exception as e:
             logger.warning("Could not verify Ollama models: %s — will attempt anyway.", e)
 
-    # ------------------------------------------------------------------
     def analyze_headline(
         self,
         headline:  str,
         symbol:    str              = "SPY",
         timestamp: Optional[datetime] = None,
     ) -> Optional[SentimentSignal]:
-        """Analyze a single headline.  Returns None if GPU busy or on error."""
+        """
+        Analyze a single headline. Returns None on error or GPU unavailability.
+
+        The GPU scheduler lock is held for the FULL Ollama call duration
+        (up to 120 seconds) so the context manager does not exit mid-inference.
+        """
         import ollama
 
         if timestamp is None:
             timestamp = datetime.now(timezone.utc)
 
-        # Cache check
+        # Cache check — no GPU needed for cache hits
         if self.use_cache:
             cached = cache.get(f"{headline}:{symbol}", self.model)
             if cached:
@@ -142,9 +141,11 @@ class NewsFlowAnalyzer:
         )
 
         try:
-            with gpu_scheduler.analysis_inference(timeout=5.0) as available:
+            # Hold the lock for the FULL inference call (not just acquisition).
+            # timeout=120s gives Qwen3-30B plenty of room on the 4070 Super.
+            with gpu_scheduler.analysis_inference(timeout=120.0) as available:
                 if not available:
-                    logger.debug("Skipping headline (GPU busy): %.50s...", headline)
+                    logger.debug("Skipping headline — GPU busy: %.50s", headline)
                     return None
 
                 response = ollama.chat(
@@ -163,46 +164,28 @@ class NewsFlowAnalyzer:
             logger.error("LLM analysis failed for '%.50s': %s", headline, e)
             return None
 
-    # ------------------------------------------------------------------
-    def _parse(
-        self,
-        response:  str,
-        headline:  str,
-        timestamp: datetime,
-    ) -> SentimentSignal:
-        """Parse JSON from LLM response into a SentimentSignal."""
+    def _parse(self, response: str, headline: str, timestamp: datetime) -> SentimentSignal:
         cleaned = response.strip()
-
-        # Strip markdown fences
         if cleaned.startswith("```json"):
             cleaned = cleaned.split("```json", 1)[1].split("```", 1)[0]
         elif cleaned.startswith("```"):
             cleaned = cleaned.split("```", 1)[1].split("```", 1)[0]
         cleaned = cleaned.strip()
 
-        # Extract first JSON object if surrounded by text
         if not cleaned.startswith("{"):
             m = re.search(r"\{.*?\}", cleaned, re.DOTALL)
-            if m:
-                cleaned = m.group(0)
-            else:
-                raise json.JSONDecodeError("No JSON object found", cleaned, 0)
+            cleaned = m.group(0) if m else "{}"
 
         try:
             data = json.loads(cleaned)
         except json.JSONDecodeError as e:
             logger.warning("JSON parse failed for '%.50s': %s", headline, e)
             return SentimentSignal(
-                headline         = headline,
-                timestamp        = timestamp,
-                sentiment        = "neutral",
-                confidence       = 0.0,
-                relevance        = 0.0,
-                urgency          = "low",
-                category         = "parse_error",
-                affected_symbols = [],
-                key_entities     = [],
-                summary          = "Parse error — defaulted to neutral.",
+                headline=headline, timestamp=timestamp,
+                sentiment="neutral", confidence=0.0, relevance=0.0,
+                urgency="low", category="parse_error",
+                affected_symbols=[], key_entities=[],
+                summary="Parse error — defaulted to neutral.",
             )
 
         return SentimentSignal(
@@ -218,44 +201,55 @@ class NewsFlowAnalyzer:
             summary          = data.get("summary",   ""),
         )
 
-    # ------------------------------------------------------------------
     def analyze_batch(
         self,
         headlines: List[str],
         symbol:    str = "SPY",
     ) -> pd.DataFrame:
-        """Analyze headlines in parallel.  Returns a DataFrame."""
+        """
+        Analyze headlines sequentially (Qwen3-30B is GPU-bound; parallelism
+        doesn't help and causes lock contention). Returns a DataFrame.
+        """
         logger.info("Batch analyzing %d headlines for %s...", len(headlines), symbol)
         results = []
 
-        with ThreadPoolExecutor(max_workers=self.max_workers) as pool:
-            futures = {
-                pool.submit(self.analyze_headline, h, symbol): h
-                for h in headlines
-            }
-            for future in as_completed(futures):
-                try:
-                    sig = future.result()
-                    if sig:
-                        results.append(sig.to_dict())
-                except Exception as e:
-                    logger.error("Batch error for '%.30s': %s", futures[future], e)
+        # Sequential: one headline at a time so the GPU lock is never contested
+        for h in headlines:
+            try:
+                sig = self.analyze_headline(h, symbol)
+                if sig:
+                    results.append(sig.to_dict())
+            except Exception as e:
+                logger.error("Batch error for '%.30s': %s", h, e)
 
         logger.info("Analyzed %d / %d headlines.", len(results), len(headlines))
         return pd.DataFrame(results) if results else pd.DataFrame()
 
-    # ------------------------------------------------------------------
     def get_aggregated_sentiment(self, df: pd.DataFrame) -> dict:
-        """Compute weighted aggregate sentiment from a batch DataFrame."""
-        if df.empty:
-            return {
-                "overall_sentiment": "neutral",
-                "sentiment_score":   0.0,
-                "confidence":        0.0,
-                "bullish_pct":       0.0,
-                "bearish_pct":       0.0,
-                "neutral_pct":       0.0,
-            }
+        """
+        Compute weighted aggregate sentiment from a batch DataFrame.
+
+        If fewer than MIN_ANALYZED_FOR_SIGNAL headlines were successfully
+        analyzed, returns neutral rather than letting a single headline
+        dominate the signal. This prevents the "1-of-34 bullish" problem.
+        """
+        NEUTRAL = {
+            "overall_sentiment": "neutral",
+            "sentiment_score":   0.0,
+            "confidence":        0.0,
+            "bullish_pct":       0.0,
+            "bearish_pct":       0.0,
+            "neutral_pct":       0.0,
+        }
+
+        if df.empty or len(df) < MIN_ANALYZED_FOR_SIGNAL:
+            if not df.empty:
+                logger.warning(
+                    "Only %d headline(s) analyzed — below minimum %d for signal. "
+                    "Returning neutral to avoid single-headline bias.",
+                    len(df), MIN_ANALYZED_FOR_SIGNAL,
+                )
+            return NEUTRAL
 
         df = df.copy()
         mapping = {"bullish": 1, "neutral": 0, "bearish": -1}
@@ -267,11 +261,11 @@ class NewsFlowAnalyzer:
 
         avg   = float(df["weighted_score"].mean())
         total = len(df)
-        counts= df["sentiment"].value_counts()
+        counts = df["sentiment"].value_counts()
 
-        return {
+        result = {
             "overall_sentiment": (
-                "bullish" if avg > 0.15 else
+                "bullish" if avg >  0.15 else
                 "bearish" if avg < -0.15 else
                 "neutral"
             ),
@@ -281,3 +275,13 @@ class NewsFlowAnalyzer:
             "bearish_pct":     float(counts.get("bearish", 0) / total),
             "neutral_pct":     float(counts.get("neutral", 0) / total),
         }
+
+        logger.info(
+            "Aggregated sentiment: %s (score=%.3f, n=%d, bull=%.0f%%, bear=%.0f%%)",
+            result["overall_sentiment"].upper(),
+            result["sentiment_score"],
+            total,
+            result["bullish_pct"] * 100,
+            result["bearish_pct"] * 100,
+        )
+        return result

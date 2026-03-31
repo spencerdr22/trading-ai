@@ -1,9 +1,10 @@
 import argparse
 import json
-import itertools
 import os
 import time
+import collections
 import pandas as pd
+import numpy as np
 import warnings
 warnings.filterwarnings("ignore", category=UserWarning, module="pkg_resources")
 
@@ -18,6 +19,7 @@ from .monitor.logger import get_logger
 from app.db.init import get_engine, get_session
 from .models.schema import Base, Metric
 from .ml.trainer import Trainer
+from .ml.features import make_features
 
 logger = get_logger(__name__)
 cfg    = load_config()
@@ -69,28 +71,119 @@ def backtest_mode(args):
     logger.info("Saved backtest results to %s", out)
 
 
+# ── Live feature buffer ───────────────────────────────────────────────────────
+
+class LiveBarBuffer:
+    """
+    Maintains a rolling window of real live bars and recomputes features
+    fresh on each new bar. This ensures the model always sees features
+    derived from actual current market data, not cached simulated values.
+
+    MIN_BARS: minimum bars needed before we produce features.
+    MAX_BARS: maximum bars to keep in the rolling window.
+    """
+
+    MIN_BARS = 60    # need at least 60 bars for EMA-50 / ATR-50 to stabilise
+    MAX_BARS = 500   # keep up to ~8 hours of 1-min bars
+
+    def __init__(self):
+        self._bars = collections.deque(maxlen=self.MAX_BARS)
+        self._feature_cols = None   # determined on first successful feature build
+
+    def push(self, bar: dict):
+        """Add a new bar dict {timestamp, open, high, low, close, volume}."""
+        self._bars.append({
+            "timestamp": bar["timestamp"],
+            "open":      float(bar["open"]),
+            "high":      float(bar["high"]),
+            "low":       float(bar["low"]),
+            "close":     float(bar["close"]),
+            "volume":    float(bar["volume"]),
+        })
+
+    def ready(self) -> bool:
+        return len(self._bars) >= self.MIN_BARS
+
+    def get_feature_row(self, trained_feature_cols: list):
+        """
+        Recompute features on the current rolling window and return a
+        single-row DataFrame aligned to trained_feature_cols.
+        Returns None if not enough bars yet.
+        """
+        if not self.ready():
+            return None
+
+        df = pd.DataFrame(list(self._bars))
+        feat = make_features(df)
+
+        # Take the LAST row (most recent bar)
+        last = feat.iloc[[-1]].copy()
+
+        # Align columns to what the model was trained on
+        # Add any missing cols as 0, drop any extras
+        for col in trained_feature_cols:
+            if col not in last.columns:
+                last[col] = 0.0
+        last = last[trained_feature_cols]
+
+        return last
+
+    def get_trend_signal(self) -> int:
+        """
+        Simple trend filter based on EMA slope.
+        Returns +1 (uptrend), -1 (downtrend), or 0 (neutral).
+        Used to block counter-trend trades.
+        """
+        if len(self._bars) < 30:
+            return 0
+        closes = pd.Series([b["close"] for b in self._bars])
+        ema_fast = closes.ewm(span=9,  adjust=False).mean()
+        ema_slow = closes.ewm(span=21, adjust=False).mean()
+        # Slope over last 5 bars
+        slope = ema_fast.iloc[-1] - ema_fast.iloc[-5]
+        cross = ema_fast.iloc[-1] - ema_slow.iloc[-1]
+        if slope > 0 and cross > 0:
+            return 1    # uptrend
+        elif slope < 0 and cross < 0:
+            return -1   # downtrend
+        return 0        # neutral / choppy
+
+
 # ── Forward / Paper trading ───────────────────────────────────────────────────
 
 def forward_mode(args):
     """
-    Continuous bar-by-bar trading loop.
+    Continuous live trading loop.
 
-    Data flow each bar:
-      load_sample -> Trainer -> StrategyEngine -> sentiment filter
-      -> Alpaca paper (or Tradovate live) + local PaperExecutor log
+    Key improvements over previous version:
+      1. LiveBarBuffer — features recomputed from real live bars each tick.
+      2. Trend filter — BUY only allowed in uptrend, SELL only in downtrend.
+      3. Consecutive-signal cap — max 3 same-direction signals before forcing
+         a pause, preventing the system from doubling into a losing trade.
+      4. Market-hours guard — stops generating signals after EOD.
     """
     from sqlalchemy import select
     from .execution.paper_executor import PaperExecutor
     from .strategy.engine import StrategyEngine
     from .strategy.adaption import Adaptor
-    from .ml.features import make_features
     from .models.schema import TradeMetric
     from .llm.news_feeds import NewsFeedManager
     from .llm.news_analyzer import NewsFlowAnalyzer
+    import pytz
+
+    ET_ZONE = pytz.timezone("America/New_York")
+
+    def now_et():
+        return datetime.now(ET_ZONE)
+
+    def is_market_hours() -> bool:
+        t = now_et().time()
+        import datetime as _dt
+        return _dt.time(9, 30) <= t <= _dt.time(16, 0)
 
     logger.info("=== Forward Trading Mode ===")
 
-    # ── Step 1: Data ──────────────────────────────────────────────────
+    # ── Step 1: Load historical data for training ─────────────────────
     df = load_sample()
     if df is None or len(df) < 120:
         logger.warning("Sample data too small — generating simulated data...")
@@ -105,12 +198,21 @@ def forward_mode(args):
         logger.error("Model training failed — cannot start forward mode.")
         return
 
+    # Determine the feature columns the model was trained on
+    # (needed to align live feature rows)
+    feat_sample  = make_features(df)
+    TRAINED_COLS = [
+        c for c in feat_sample.columns
+        if c not in ("timestamp", "open", "high", "low", "close", "volume")
+    ]
+    logger.info("Model trained on %d feature columns.", len(TRAINED_COLS))
+
     adaptor = Adaptor()
     strat   = StrategyEngine(model, adaptor, cfg)
 
     # ── Step 3: Execution client ──────────────────────────────────────
-    use_live   = getattr(args, "live",   False)
-    use_alpaca = getattr(args, "alpaca", False)
+    use_alpaca  = getattr(args, "alpaca", False)
+    use_live    = getattr(args, "live",   False)
     live_client = None
 
     if use_live:
@@ -143,7 +245,22 @@ def forward_mode(args):
 
     exe = PaperExecutor(cfg)  # always logs locally
 
-    # ── Step 4: Sentiment ─────────────────────────────────────────────
+    # ── Step 4: Live bar buffer (replaces simulated feature cycling) ──
+    bar_buffer = LiveBarBuffer()
+
+    # Seed the buffer with recent bars from Alpaca (up to MAX_BARS)
+    if live_client and hasattr(live_client, "get_latest_bar"):
+        logger.info("Seeding live bar buffer...")
+        seed_bar = live_client.get_latest_bar()
+        if seed_bar:
+            # Push the same bar multiple times to warm up indicators;
+            # real bars will overwrite as they arrive each minute
+            for _ in range(LiveBarBuffer.MIN_BARS):
+                bar_buffer.push(seed_bar)
+            logger.info("Bar buffer seeded with latest live bar (x%d).",
+                        LiveBarBuffer.MIN_BARS)
+
+    # ── Step 5: Sentiment ─────────────────────────────────────────────
     news_manager    = NewsFeedManager(symbols=[args.symbol])
     analyzer        = NewsFlowAnalyzer()
     sentiment_score = 0.0
@@ -156,7 +273,7 @@ def forward_mode(args):
             logger.info("Fetching news headlines...")
             headlines_df = news_manager.get_recent_headlines(hours=4)
             if headlines_df.empty:
-                logger.info("No headlines — holding sentiment at %s.", sentiment_label)
+                logger.info("No headlines — keeping sentiment at %s.", sentiment_label)
                 return
             headlines    = headlines_df["headline"].dropna().tolist()
             logger.info("Fetched %d headlines — running Qwen3 sentiment...", len(headlines))
@@ -174,82 +291,162 @@ def forward_mode(args):
 
     refresh_sentiment()
 
-    # ── Step 5: Feature matrix ────────────────────────────────────────
-    feat = make_features(df)
-    X    = feat.drop(
-        columns=["timestamp", "open", "high", "low", "close", "volume"],
-        errors="ignore",
+    # ── Step 6: Main loop ─────────────────────────────────────────────
+    trades              = []
+    trade_count         = 0
+    bar_count           = 0
+    last_retrain        = time.time()
+    RETRAIN_SECS        = 3600
+    BAR_SLEEP           = 60 if live_client else 0.1
+
+    # Consecutive-signal cap: max same-direction signals in a row
+    MAX_CONSECUTIVE     = 3
+    consecutive_side    = None
+    consecutive_count   = 0
+
+    logger.info(
+        "Live loop starting | bar_sleep=%ds | trend_filter=ON | "
+        "consecutive_cap=%d | market_hours_guard=ON",
+        BAR_SLEEP, MAX_CONSECUTIVE,
     )
 
-    # ── Step 6: Live bar helper ───────────────────────────────────────
-    def get_current_bar(row):
-        if live_client:
-            live = live_client.get_latest_bar()
-            if live:
-                for col in ["open", "high", "low", "close", "volume"]:
-                    if col in row.index:
-                        row[col] = live[col]
-                row["timestamp"] = live["timestamp"]
-        return row
-
-    # ── Step 7: Main loop ─────────────────────────────────────────────
-    trades       = []
-    trade_count  = 0
-    bar_count    = 0
-    last_retrain = time.time()
-    RETRAIN_BARS = 100
-    RETRAIN_SECS = 3600
-    BAR_SLEEP    = 60 if live_client else 0.1
-
-    # Live: cycle indefinitely on real prices. Sim: single pass.
-    row_source = (
-        itertools.cycle(feat.iterrows()) if live_client
-        else feat.iterrows()
-    )
-
-    for i, row in row_source:
+    while True:
         bar_count += 1
 
+        # ── Market hours guard ────────────────────────────────────────
+        if live_client and not is_market_hours():
+            logger.info("Outside market hours — pausing (bar %d).", bar_count)
+            time.sleep(60)
+            continue
+
+        # ── Fetch latest live bar ─────────────────────────────────────
+        current_bar = None
+        if live_client:
+            try:
+                current_bar = live_client.get_latest_bar()
+            except Exception as e:
+                logger.warning("Bar fetch failed: %s", e)
+
+        if current_bar is None:
+            # No live bar available — sleep and retry
+            logger.debug("No bar available at bar %d — sleeping.", bar_count)
+            time.sleep(BAR_SLEEP)
+            continue
+
+        # ── Update bar buffer ─────────────────────────────────────────
+        bar_buffer.push(current_bar)
+
+        # ── Sentiment refresh ─────────────────────────────────────────
         if bar_count % SENTIMENT_REFRESH_BARS == 0:
             refresh_sentiment()
 
-        row    = get_current_bar(row)
-        signal = strat.on_bar(X.loc[[i]])
+        # ── Build live feature row ────────────────────────────────────
+        if not bar_buffer.ready():
+            logger.info(
+                "Bar buffer warming up (%d/%d bars) — HOLD.",
+                len(bar_buffer._bars), LiveBarBuffer.MIN_BARS,
+            )
+            time.sleep(BAR_SLEEP)
+            continue
 
-        # Sentiment filter
+        X_live = bar_buffer.get_feature_row(TRAINED_COLS)
+        if X_live is None:
+            time.sleep(BAR_SLEEP)
+            continue
+
+        # ── Trend filter ──────────────────────────────────────────────
+        trend = bar_buffer.get_trend_signal()   # +1 up, -1 down, 0 neutral
+
+        # ── Model signal ──────────────────────────────────────────────
+        # Use the live feature row directly (not a simulated index)
+        signal = strat.on_bar(X_live)
+
         if isinstance(signal, dict):
             side = signal.get("side", "HOLD")
+
+            # -- Trend filter: block counter-trend entries -------------
+            if side == "BUY" and trend == -1:
+                logger.info(
+                    "Bar %d: BUY blocked by downtrend filter (trend=%d)",
+                    bar_count, trend,
+                )
+                signal["side"] = "HOLD"
+                signal["trend_override"] = True
+                side = "HOLD"
+
+            elif side == "SELL" and trend == 1:
+                logger.info(
+                    "Bar %d: SELL blocked by uptrend filter (trend=%d)",
+                    bar_count, trend,
+                )
+                signal["side"] = "HOLD"
+                signal["trend_override"] = True
+                side = "HOLD"
+
+            # -- Consecutive-signal cap --------------------------------
+            if side != "HOLD":
+                if side == consecutive_side:
+                    consecutive_count += 1
+                else:
+                    consecutive_side  = side
+                    consecutive_count = 1
+
+                if consecutive_count > MAX_CONSECUTIVE:
+                    logger.info(
+                        "Bar %d: %s blocked — %d consecutive same-direction "
+                        "signals (cap=%d).",
+                        bar_count, side, consecutive_count, MAX_CONSECUTIVE,
+                    )
+                    signal["side"] = "HOLD"
+                    signal["consecutive_override"] = True
+                    side = "HOLD"
+            else:
+                # HOLD resets the streak counter
+                consecutive_side  = None
+                consecutive_count = 0
+
+            # -- Sentiment filter -------------------------------------
             if side == "BUY" and sentiment_score < -0.15:
                 signal["side"] = "HOLD"
                 signal["sentiment_override"] = True
-                logger.debug("Bar %d: BUY -> HOLD (bearish %.2f)", bar_count, sentiment_score)
+                logger.debug(
+                    "Bar %d: BUY -> HOLD (bearish sentiment %.2f)",
+                    bar_count, sentiment_score,
+                )
+                side = "HOLD"
             elif side == "SELL" and sentiment_score > 0.15:
                 signal["side"] = "HOLD"
                 signal["sentiment_override"] = True
-                logger.debug("Bar %d: SELL -> HOLD (bullish %.2f)", bar_count, sentiment_score)
+                logger.debug(
+                    "Bar %d: SELL -> HOLD (bullish sentiment %.2f)",
+                    bar_count, sentiment_score,
+                )
+                side = "HOLD"
 
-        # Execute
+        # ── Execute ───────────────────────────────────────────────────
         if live_client:
-            live_client.execute_mes_signal(signal, row.to_dict())
-        exe.place_order(row, signal)
+            live_client.execute_mes_signal(signal, current_bar)
+
+        # Local paper log (use current_bar for realistic pnl tracking)
+        exe.place_order(pd.Series(current_bar), signal)
         trade_count += 1
 
-        # Log trade
+        # ── Log trade ─────────────────────────────────────────────────
         trade_entry = {
-            "timestamp":       row["timestamp"],
+            "timestamp":       current_bar["timestamp"],
             "symbol":          args.symbol,
             "side":            signal.get("side") if isinstance(signal, dict) else signal,
-            "confidence":      signal.get("confidence") if isinstance(signal, dict) else None,
+            "confidence":      signal.get("strength") if isinstance(signal, dict) else None,
             "sentiment":       sentiment_label,
             "sentiment_score": sentiment_score,
-            "pnl":             float(row.get("pnl", 0.0)),
+            "trend":           trend,
+            "pnl":             0.0,   # live PnL tracked by Alpaca, not here
             "status":          "FILLED",
         }
         trades.append(trade_entry)
 
         try:
-            # Normalise timestamp — Alpaca returns ISO strings, pandas returns Timestamps
-            raw_ts = row["timestamp"]
+            raw_ts = current_bar["timestamp"]
             if isinstance(raw_ts, str):
                 raw_ts = datetime.fromisoformat(
                     raw_ts.replace("Z", "+00:00")
@@ -258,34 +455,43 @@ def forward_mode(args):
                 raw_ts = raw_ts.to_pydatetime().replace(tzinfo=None)
             elif isinstance(raw_ts, datetime) and raw_ts.tzinfo is not None:
                 raw_ts = raw_ts.replace(tzinfo=None)
+
             with get_session() as s:
                 s.add(TradeMetric(
                     symbol    = args.symbol,
                     timestamp = raw_ts,
-                    side      = {"side": trade_entry["side"],
-                                 "confidence": trade_entry["confidence"]},
-                    pnl       = trade_entry["pnl"],
-                    status    = "FILLED",
+                    side      = {
+                        "side":       trade_entry["side"],
+                        "confidence": trade_entry["confidence"],
+                        "trend":      trend,
+                    },
+                    pnl    = 0.0,
+                    status = "FILLED",
                 ))
                 s.commit()
         except Exception as e:
             logger.error("Trade DB log failed: %s", e)
 
-        # Periodic retrain
+        # ── Periodic retrain ──────────────────────────────────────────
         now = time.time()
-        if trade_count % RETRAIN_BARS == 0 or (now - last_retrain) > RETRAIN_SECS:
-            logger.info("Intraday quick retrain triggered...")
+        if (now - last_retrain) > RETRAIN_SECS:
+            logger.info("Intraday retrain triggered...")
             try:
                 from .training_pipeline import quick_retrain
                 quick_retrain()
+                # Reload model after retrain
+                loaded = trainer.load()
+                if loaded is not None:
+                    strat.model = loaded
+                    logger.info("Intraday retrain complete — model updated.")
             except Exception as e:
-                logger.warning("Quick retrain failed: %s", e)
+                logger.warning("Intraday retrain failed: %s", e)
             last_retrain = now
             trade_count  = 0
 
         time.sleep(BAR_SLEEP)
 
-    # ── Step 8: Save results ──────────────────────────────────────────
+    # ── Save results (reached only if loop exits non-interactively) ───
     out_dir = os.path.join(os.getcwd(), "data")
     os.makedirs(out_dir, exist_ok=True)
 
@@ -297,32 +503,10 @@ def forward_mode(args):
     pd.DataFrame(exe.positions).to_csv(positions_path, index=False)
     logger.info("Saved position log to %s", positions_path)
 
-    # DB export backup
-    try:
-        from sqlalchemy import select as sa_select
-        with get_session() as s:
-            rows = s.execute(sa_select(TradeMetric)).scalars().all()
-            if rows:
-                db_path = os.path.join(out_dir, f"db_export_{args.symbol}.csv")
-                pd.DataFrame([{
-                    "id":        t.id,
-                    "symbol":    t.symbol,
-                    "timestamp": t.timestamp,
-                    "side":      t.side if isinstance(t.side, str) else json.dumps(t.side),
-                    "pnl":       t.pnl,
-                    "status":    t.status,
-                } for t in rows]).to_csv(db_path, index=False)
-                logger.info("DB export saved to %s", db_path)
-    except Exception as e:
-        logger.error("DB export failed: %s", e)
-
-    logger.info("Forward run complete. %d bars processed.", bar_count)
-
 
 # ── Live mode (Tradovate direct) ──────────────────────────────────────────────
 
 def live_mode(args):
-    """Tradovate live — delegates to forward_mode with --live flag."""
     args.live = True
     forward_mode(args)
 

@@ -3,6 +3,13 @@ engine.py — Adaptive Strategy Engine
 
 Combines supervised model predictions (RF/LSTM/Hybrid) with an optional
 RL policy using dynamic confidence-weighted blending.
+
+Changes vs previous version:
+  - BUY_THRESHOLD raised from 0.60 → 0.65 (require more conviction)
+  - SELL_THRESHOLD raised from 0.60 → 0.65
+  - MIN_MARGIN raised from 0.08 → 0.12 (clearer directional edge required)
+  - Added STRONG_MARGIN (0.20): signals above this get "strong" tag for
+    logging, so we can see which trades were high-conviction
 """
 
 import numpy as np
@@ -10,7 +17,6 @@ import pandas as pd
 
 from ..monitor.logger import get_logger
 
-# Torch is optional — only needed for LSTM / hybrid / RL
 try:
     import torch
     TORCH_AVAILABLE = True
@@ -35,20 +41,27 @@ class StrategyEngine:
         classes   : label classes — default [-1, 0, 1]
     """
 
+    # Decision thresholds — only fire when model is genuinely confident
+    BUY_THRESHOLD  = 0.65   # raised from 0.60
+    SELL_THRESHOLD = 0.65   # raised from 0.60
+    MIN_MARGIN     = 0.12   # raised from 0.08 — require clear directional edge
+    STRONG_MARGIN  = 0.20   # above this = strong signal (logged for analysis)
+
     def __init__(self, predictor, adaptor, cfg: dict, classes=None):
         self.predictor  = predictor
         self.adaptor    = adaptor
         self.cfg        = cfg
         self.classes    = classes or [-1, 0, 1]
 
-        # Pull model and type from predictor safely
         self.model      = getattr(predictor, "model", predictor)
         self.model_type = getattr(predictor, "model_type", "rf")
         self.rl_policy  = getattr(predictor, "rl_policy", None)
 
         logger.info(
-            "StrategyEngine ready | model_type=%s | classes=%s",
-            self.model_type, self.classes,
+            "StrategyEngine ready | model_type=%s | BUY_thr=%.2f | "
+            "SELL_thr=%.2f | MIN_margin=%.2f",
+            self.model_type, self.BUY_THRESHOLD,
+            self.SELL_THRESHOLD, self.MIN_MARGIN,
         )
 
     # ------------------------------------------------------------------
@@ -132,7 +145,7 @@ class StrategyEngine:
     def blend(self, sup: dict, rl: dict | None) -> dict:
         """Confidence-weighted blend of supervised + RL signals."""
         if rl is None:
-            return sup  # pure supervised — no rl_confidence key added here
+            return sup
 
         probs   = rl["probs_raw"]
         rl_conf = float(np.clip(np.max(probs) - np.min(probs), 0.0, 1.0))
@@ -151,7 +164,7 @@ class StrategyEngine:
 
     def on_bar(self, X_row) -> dict:
         """
-        Called once per bar.  X_row is a single-row DataFrame or Series
+        Called once per bar. X_row is a single-row DataFrame or Series
         containing numeric feature columns.
 
         Returns {"side": "BUY"|"SELL"|"HOLD", "strength": float}
@@ -179,11 +192,6 @@ class StrategyEngine:
     # Full decision pipeline
     # ------------------------------------------------------------------
 
-    # Thresholds — only act when the model is genuinely confident
-    BUY_THRESHOLD  = 0.60   # probability must exceed this to BUY
-    SELL_THRESHOLD = 0.60   # probability of DOWN must exceed this to SELL
-    MIN_MARGIN     = 0.08   # buy_prob must beat sell_prob by at least this
-
     def decide(
         self,
         features: np.ndarray,
@@ -192,10 +200,13 @@ class StrategyEngine:
     ) -> dict:
         """
         Run the full supervised -> RL -> blend -> action pipeline.
-        Only fires BUY/SELL when confidence is meaningfully above threshold
-        AND the model has a clear directional edge (margin check).
 
-        Returns a dict with keys: action, supervised, rl, final.
+        Fires BUY/SELL only when:
+          1. Probability exceeds BUY_THRESHOLD / SELL_THRESHOLD
+          2. The directional margin (|buy_prob - sell_prob|) >= MIN_MARGIN
+
+        Both conditions must be met — this eliminates borderline trades
+        where the model is only marginally confident.
         """
         sup     = self.supervised_predict(features, lstm_window)
         rl      = self.rl_predict(rl_state_vector) if rl_state_vector is not None else None
@@ -204,18 +215,28 @@ class StrategyEngine:
         buy_p  = blended["buy"]
         sell_p = blended["sell"]
         margin = abs(buy_p - sell_p)
+        strong = margin >= self.STRONG_MARGIN
 
-        # Require both threshold AND margin to fire — avoids borderline trades
-        if buy_p > self.BUY_THRESHOLD and margin >= self.MIN_MARGIN:
+        if buy_p >= self.BUY_THRESHOLD and margin >= self.MIN_MARGIN:
             action = "BUY"
-        elif sell_p > self.SELL_THRESHOLD and margin >= self.MIN_MARGIN:
+        elif sell_p >= self.SELL_THRESHOLD and margin >= self.MIN_MARGIN:
             action = "SELL"
         else:
             action = "HOLD"
 
         rl_conf = blended.get("rl_confidence", 0.0)
         logger.info(
-            "Decision: %s  (buy=%.3f  sell=%.3f  margin=%.3f  rl_conf=%.3f)",
-            action, buy_p, sell_p, margin, rl_conf,
+            "Decision: %s%s  (buy=%.3f  sell=%.3f  margin=%.3f  rl_conf=%.3f)",
+            action,
+            " [STRONG]" if action != "HOLD" and strong else "",
+            buy_p, sell_p, margin, rl_conf,
         )
         return {"action": action, "supervised": sup, "rl": rl, "final": blended}
+
+    # ------------------------------------------------------------------
+    # Periodic adaptation
+    # ------------------------------------------------------------------
+
+    def adapt(self, recent_trades: list):
+        """Delegate to adaptor for threshold updates based on recent trades."""
+        return self.adaptor.update(recent_trades)
