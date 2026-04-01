@@ -161,6 +161,7 @@ def forward_mode(args):
       3. Consecutive-signal cap — max 3 same-direction signals before forcing
          a pause, preventing the system from doubling into a losing trade.
       4. Market-hours guard — stops generating signals after EOD.
+      5. init_llm() called at startup — logs GPU config to app_llm.log.
     """
     from sqlalchemy import select
     from .execution.paper_executor import PaperExecutor
@@ -169,6 +170,7 @@ def forward_mode(args):
     from .models.schema import TradeMetric
     from .llm.news_feeds import NewsFeedManager
     from .llm.news_analyzer import NewsFlowAnalyzer
+    from .llm import init_llm, check_gpu_utilisation
     import pytz
 
     ET_ZONE = pytz.timezone("America/New_York")
@@ -182,6 +184,17 @@ def forward_mode(args):
         return _dt.time(9, 30) <= t <= _dt.time(16, 0)
 
     logger.info("=== Forward Trading Mode ===")
+
+    # ── LLM / GPU health check ────────────────────────────────────────
+    # Logs Ollama model availability, OLLAMA_NUM_GPU config, and GPU
+    # utilisation to app_llm.log. Warns if Ollama is not running or
+    # if the GPU layer split looks wrong.
+    llm_ok = init_llm()
+    if not llm_ok:
+        logger.warning(
+            "Ollama unavailable or model missing — sentiment will be neutral. "
+            "Ensure Ollama is running via start_trading.bat."
+        )
 
     # ── Step 1: Load historical data for training ─────────────────────
     df = load_sample()
@@ -253,8 +266,6 @@ def forward_mode(args):
         logger.info("Seeding live bar buffer...")
         seed_bar = live_client.get_latest_bar()
         if seed_bar:
-            # Push the same bar multiple times to warm up indicators;
-            # real bars will overwrite as they arrive each minute
             for _ in range(LiveBarBuffer.MIN_BARS):
                 bar_buffer.push(seed_bar)
             logger.info("Bar buffer seeded with latest live bar (x%d).",
@@ -328,7 +339,6 @@ def forward_mode(args):
                 logger.warning("Bar fetch failed: %s", e)
 
         if current_bar is None:
-            # No live bar available — sleep and retry
             logger.debug("No bar available at bar %d — sleeping.", bar_count)
             time.sleep(BAR_SLEEP)
             continue
@@ -358,7 +368,6 @@ def forward_mode(args):
         trend = bar_buffer.get_trend_signal()   # +1 up, -1 down, 0 neutral
 
         # ── Model signal ──────────────────────────────────────────────
-        # Use the live feature row directly (not a simulated index)
         signal = strat.on_bar(X_live)
 
         if isinstance(signal, dict):
@@ -401,7 +410,6 @@ def forward_mode(args):
                     signal["consecutive_override"] = True
                     side = "HOLD"
             else:
-                # HOLD resets the streak counter
                 consecutive_side  = None
                 consecutive_count = 0
 
@@ -427,7 +435,6 @@ def forward_mode(args):
         if live_client:
             live_client.execute_mes_signal(signal, current_bar)
 
-        # Local paper log (use current_bar for realistic pnl tracking)
         exe.place_order(pd.Series(current_bar), signal)
         trade_count += 1
 
@@ -440,7 +447,7 @@ def forward_mode(args):
             "sentiment":       sentiment_label,
             "sentiment_score": sentiment_score,
             "trend":           trend,
-            "pnl":             0.0,   # live PnL tracked by Alpaca, not here
+            "pnl":             0.0,
             "status":          "FILLED",
         }
         trades.append(trade_entry)
@@ -479,7 +486,6 @@ def forward_mode(args):
             try:
                 from .training_pipeline import quick_retrain
                 quick_retrain()
-                # Reload model after retrain
                 loaded = trainer.load()
                 if loaded is not None:
                     strat.model = loaded

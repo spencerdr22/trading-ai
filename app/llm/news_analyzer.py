@@ -1,10 +1,10 @@
 """
-news_analyzer.py — Qwen3-30B sentiment analysis via Ollama.
+news_analyzer.py — Qwen3 sentiment analysis via Ollama.
 
-Key fix: analysis_inference timeout raised to 120s so the lock is held
-for the full LLM call, not just the 5s acquisition window. Previously
-only 1 headline per batch was processed because the context manager
-exited after 5s while Qwen3 was still generating the response.
+Model: qwen3:8b (5.2GB, full GPU on RTX 4070 Super)
+  - 2-5 seconds per headline vs 13-55s for 30B
+  - Sentiment classification accuracy near-identical for financial headlines
+  - Full VRAM fit leaves 4GB headroom for KV cache and compute graph
 
 All emoji stripped for Windows cp1252 compatibility.
 """
@@ -15,7 +15,6 @@ import pandas as pd
 from datetime import datetime, timezone
 from dataclasses import dataclass
 from typing import List, Optional
-from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from ..monitor.logger import get_logger
 from .prompts import SENTIMENT_ANALYSIS_PROMPT
@@ -24,11 +23,13 @@ from .gpu_scheduler import gpu_scheduler
 
 logger = get_logger(__name__)
 
-DEFAULT_MODEL  = "qwen3:30b-a3b-q4_K_M"
-FALLBACK_MODEL = "qwen3:14b"
+# Import model names from package __init__ so there is one source of truth.
+# If you change the model, change it in __init__.py only.
+from . import DEFAULT_MODEL, FALLBACK_MODEL
 
 # Minimum successful analyses before aggregation is trusted.
-# Below this threshold, return neutral to avoid single-headline bias.
+# Below this threshold get_aggregated_sentiment() returns neutral
+# to avoid single-headline bias.
 MIN_ANALYZED_FOR_SIGNAL = 3
 
 
@@ -73,13 +74,13 @@ class SentimentSignal:
 
 
 class NewsFlowAnalyzer:
-    """LLM-powered news sentiment analysis using Qwen3 via Ollama."""
+    """Qwen3 sentiment analysis for financial headlines via Ollama."""
 
     def __init__(
         self,
         model:       str  = DEFAULT_MODEL,
         use_cache:   bool = True,
-        max_workers: int  = 4,   # reduced: Qwen3-30B is single-threaded on GPU
+        max_workers: int  = 4,
     ):
         self.model       = model
         self.use_cache   = use_cache
@@ -98,10 +99,17 @@ class NewsFlowAnalyzer:
             logger.info("Ollama available models: %s", available)
             if self.model not in available:
                 if FALLBACK_MODEL in available:
-                    logger.warning("Model %s not found — using %s.", self.model, FALLBACK_MODEL)
+                    logger.warning(
+                        "Model %s not found — using %s. "
+                        "Pull with: ollama pull %s",
+                        self.model, FALLBACK_MODEL, self.model,
+                    )
                     self.model = FALLBACK_MODEL
                 else:
-                    logger.warning("Neither primary nor fallback model found — will attempt anyway.")
+                    logger.warning(
+                        "Neither %s nor %s found. Run: ollama pull %s",
+                        self.model, FALLBACK_MODEL, self.model,
+                    )
             else:
                 logger.info("Using model: %s", self.model)
         except Exception as e:
@@ -114,10 +122,9 @@ class NewsFlowAnalyzer:
         timestamp: Optional[datetime] = None,
     ) -> Optional[SentimentSignal]:
         """
-        Analyze a single headline. Returns None on error or GPU unavailability.
-
-        The GPU scheduler lock is held for the FULL Ollama call duration
-        (up to 120 seconds) so the context manager does not exit mid-inference.
+        Analyze a single headline.
+        The GPU scheduler lock is held for the full Ollama call duration.
+        With qwen3:8b this is typically 2-5 seconds.
         """
         import ollama
 
@@ -141,9 +148,9 @@ class NewsFlowAnalyzer:
         )
 
         try:
-            # Hold the lock for the FULL inference call (not just acquisition).
-            # timeout=120s gives Qwen3-30B plenty of room on the 4070 Super.
-            with gpu_scheduler.analysis_inference(timeout=120.0) as available:
+            # Hold the lock for the full inference call.
+            # With qwen3:8b on full GPU, 30s is more than enough.
+            with gpu_scheduler.analysis_inference(timeout=30.0) as available:
                 if not available:
                     logger.debug("Skipping headline — GPU busy: %.50s", headline)
                     return None
@@ -207,13 +214,13 @@ class NewsFlowAnalyzer:
         symbol:    str = "SPY",
     ) -> pd.DataFrame:
         """
-        Analyze headlines sequentially (Qwen3-30B is GPU-bound; parallelism
-        doesn't help and causes lock contention). Returns a DataFrame.
+        Analyze headlines sequentially.
+        With qwen3:8b on full GPU a 20-headline batch takes ~1-2 minutes
+        instead of 10-15 minutes with the 30B model.
         """
         logger.info("Batch analyzing %d headlines for %s...", len(headlines), symbol)
         results = []
 
-        # Sequential: one headline at a time so the GPU lock is never contested
         for h in headlines:
             try:
                 sig = self.analyze_headline(h, symbol)
@@ -227,11 +234,9 @@ class NewsFlowAnalyzer:
 
     def get_aggregated_sentiment(self, df: pd.DataFrame) -> dict:
         """
-        Compute weighted aggregate sentiment from a batch DataFrame.
-
-        If fewer than MIN_ANALYZED_FOR_SIGNAL headlines were successfully
-        analyzed, returns neutral rather than letting a single headline
-        dominate the signal. This prevents the "1-of-34 bullish" problem.
+        Compute weighted aggregate sentiment.
+        Returns neutral if fewer than MIN_ANALYZED_FOR_SIGNAL headlines
+        were successfully processed, preventing single-headline bias.
         """
         NEUTRAL = {
             "overall_sentiment": "neutral",
@@ -245,7 +250,7 @@ class NewsFlowAnalyzer:
         if df.empty or len(df) < MIN_ANALYZED_FOR_SIGNAL:
             if not df.empty:
                 logger.warning(
-                    "Only %d headline(s) analyzed — below minimum %d for signal. "
+                    "Only %d headline(s) analyzed — below minimum %d. "
                     "Returning neutral to avoid single-headline bias.",
                     len(df), MIN_ANALYZED_FOR_SIGNAL,
                 )
@@ -259,8 +264,8 @@ class NewsFlowAnalyzer:
             * df["relevance"]
         )
 
-        avg   = float(df["weighted_score"].mean())
-        total = len(df)
+        avg    = float(df["weighted_score"].mean())
+        total  = len(df)
         counts = df["sentiment"].value_counts()
 
         result = {
