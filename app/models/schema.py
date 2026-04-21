@@ -94,10 +94,15 @@ class TradeMetric(Base):
     __tablename__ = "trade_metrics"
 
     id:        Mapped[int]            = mapped_column(primary_key=True)
-    symbol:    Mapped[str]            = mapped_column(String, index=True)
-    timestamp: Mapped[DateTime]       = mapped_column(DateTime(timezone=True), index=True)
+    # symbol is nullable so both forward_mode and learner.py can insert cleanly
+    symbol:    Mapped[Optional[str]]  = mapped_column(String, index=True, nullable=True)
+    timestamp: Mapped[DateTime]       = mapped_column(
+        DateTime(timezone=True), index=True, server_default=func.now()
+    )
     side:      Mapped[Optional[dict]] = mapped_column(JSON,   nullable=True)
     pnl:       Mapped[float]          = mapped_column(Float,  default=0.0)
+    # reward populated by RL learner
+    reward:    Mapped[Optional[float]]= mapped_column(Float,  nullable=True)
     status:    Mapped[str]            = mapped_column(String, default="FILLED")
 
 

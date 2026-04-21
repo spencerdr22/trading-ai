@@ -9,13 +9,21 @@ Key design principles for profitability:
 """
 
 import pandas as pd
+import warnings
 import numpy as np
+warnings.filterwarnings("ignore", category=RuntimeWarning, message="overflow encountered")
+warnings.filterwarnings("ignore", category=RuntimeWarning, message="invalid value encountered")
+np.seterr(over='ignore', invalid='ignore')  # suppress numpy-level overflow
 
 
 # ── Primitives ────────────────────────────────────────────────────────────────
 
 def ema(series: pd.Series, span: int) -> pd.Series:
-    return series.ewm(span=span, adjust=False).mean()
+    # Clip extreme values before computing EMA
+    clipped = series.clip(lower=-1e6, upper=1e6)
+    result = clipped.ewm(span=span, adjust=False).mean()
+    # Replace any remaining inf/nan with forward/back fill
+    return result.replace([np.inf, -np.inf], np.nan).ffill().bfill().fillna(0)
 
 
 def rsi(series: pd.Series, window: int = 14) -> pd.Series:
@@ -60,6 +68,27 @@ def bollinger_bands(series: pd.Series, window: int = 20, n_std: float = 2.0):
 # ── Main feature builder ──────────────────────────────────────────────────────
 
 def make_features(df: pd.DataFrame, window: int = 30) -> pd.DataFrame:
+    df = df.copy()
+
+    # Normalize close to prevent overflow in EMA
+    price_ref = df["close"].iloc[0] if len(df) > 0 else 1.0
+    close_norm = df["close"] / price_ref  # relative prices, ~1.0
+
+    df["return_1"] = df["close"].pct_change().fillna(0)
+    for i in range(1, min(window, len(df))):
+        df[f"lag_{i}"] = close_norm.shift(i)  # normalized lags
+
+    # Core indicators on normalized prices
+    df["ema_short"] = ema(close_norm, 12)
+    df["ema_long"] = ema(close_norm, 26)
+    df["rsi"] = rsi(df["close"], 14)        # RSI is already 0-100, fine
+    df["atr"] = atr(df, 14) / price_ref     # normalize ATR too
+    df["macd"], df["macd_signal"], df["macd_hist"] = macd(close_norm)
+    df["vol_mean_30"] = df["volume"].rolling(min(30, len(df)), min_periods=1).mean()
+    df["vol_mean_30"] = df["vol_mean_30"] / (df["vol_mean_30"].max() + 1e-8)  # normalize volume
+
+    df = df.bfill().ffill().fillna(0)
+    return df
     """
     Build a normalised, regime-aware feature DataFrame.
 

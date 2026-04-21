@@ -32,7 +32,7 @@ TARGET_ROWS     = 1440          # ~1 trading day of 1-min bars
 CACHE_MAX_AGE_S = 30 * 60      # 30 minutes — stale after this
 
 
-def fetch_real_bars(symbol: str = "SPY", days: int = 5) -> pd.DataFrame:
+def fetch_real_bars(symbol: str = "SPY", days: int = 30) -> pd.DataFrame:
     """
     Pull recent 1-minute OHLCV bars from Alpaca market data API.
     Returns empty DataFrame if credentials missing or request fails.
@@ -54,22 +54,35 @@ def fetch_real_bars(symbol: str = "SPY", days: int = 5) -> pd.DataFrame:
         "end":       end.strftime("%Y-%m-%dT%H:%M:%SZ"),
         "limit":     10000,
         "feed":      "iex",
+        "adjustment": "raw",
     }
 
+    all_bars = []
+    next_token = None
+
     try:
-        r = requests.get(
-            f"{ALPACA_DATA_URL}/v2/stocks/{symbol}/bars",
-            headers=headers,
-            params=params,
-            timeout=15,
-        )
-        r.raise_for_status()
-        bars = r.json().get("bars", [])
-        if not bars:
+        while True:
+            if next_token:
+                params["page_token"] = next_token
+            r = requests.get(
+                f"{ALPACA_DATA_URL}/v2/stocks/{symbol}/bars",
+                headers=headers,
+                params=params,
+                timeout=30,
+            )
+            r.raise_for_status()
+            data = r.json()
+            bars = data.get("bars", [])
+            all_bars.extend(bars)
+            next_token = data.get("next_page_token")
+            if not next_token or not bars:
+                break
+
+        if not all_bars:
             print(f"[WARN] Alpaca returned 0 bars for {symbol}.")
             return pd.DataFrame()
 
-        df = pd.DataFrame(bars)
+        df = pd.DataFrame(all_bars)
         df = df.rename(columns={
             "t": "timestamp",
             "o": "open",

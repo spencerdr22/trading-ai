@@ -1,16 +1,17 @@
 """
 news_analyzer.py — Qwen3 sentiment analysis via Ollama.
 
-Model: qwen3:8b (5.2GB, full GPU on RTX 4070 Super)
-  - 2-5 seconds per headline vs 13-55s for 30B
-  - Sentiment classification accuracy near-identical for financial headlines
-  - Full VRAM fit leaves 4GB headroom for KV cache and compute graph
+Routes through the AI Orchestrator (/trading/analyze) for LLM analysis.
+Falls back to direct Ollama (port 11434) if orchestrator is not running.
 
-All emoji stripped for Windows cp1252 compatibility.
+Orchestrator endpoint: http://localhost:8000/trading/analyze
+Direct Ollama fallback: http://localhost:11434
 """
 
+import os
 import json
 import re
+import requests
 import pandas as pd
 from datetime import datetime, timezone
 from dataclasses import dataclass
@@ -23,14 +24,38 @@ from .gpu_scheduler import gpu_scheduler
 
 logger = get_logger(__name__)
 
-# Import model names from package __init__ so there is one source of truth.
-# If you change the model, change it in __init__.py only.
 from . import DEFAULT_MODEL, FALLBACK_MODEL
 
-# Minimum successful analyses before aggregation is trusted.
-# Below this threshold get_aggregated_sentiment() returns neutral
-# to avoid single-headline bias.
 MIN_ANALYZED_FOR_SIGNAL = 3
+
+# ── Endpoint resolution ───────────────────────────────────────────────────────
+# Try AI Orchestrator first (http://localhost:8000) — gives priority routing,
+# model management, and metrics tracking.
+# Fall back to direct Ollama (port 11434) if orchestrator is not running.
+
+_ORCHESTRATOR_URL = os.getenv("ORCHESTRATOR_URL", "http://localhost:8000")
+_DIRECT_URL       = os.getenv("OLLAMA_BASE_URL",   "http://localhost:11434")
+_USE_ORCHESTRATOR = False  # resolved at import time below
+
+def _check_orchestrator() -> bool:
+    """Return True if the AI Orchestrator is reachable."""
+    try:
+        r = requests.get(f"{_ORCHESTRATOR_URL}/health", timeout=2)
+        return r.status_code == 200
+    except Exception:
+        return False
+
+_USE_ORCHESTRATOR = _check_orchestrator()
+
+if _USE_ORCHESTRATOR:
+    logger.info("Routing LLM calls through AI Orchestrator at %s", _ORCHESTRATOR_URL)
+else:
+    logger.warning(
+        "AI Orchestrator not reachable — falling back to direct Ollama at %s",
+        _DIRECT_URL,
+    )
+
+_TRADING_HEADERS = {"Content-Type": "application/json"}
 
 
 @dataclass
@@ -78,60 +103,84 @@ class NewsFlowAnalyzer:
 
     def __init__(
         self,
-        model:       str  = DEFAULT_MODEL,
-        use_cache:   bool = True,
-        max_workers: int  = 4,
+        model:     str  = DEFAULT_MODEL,
+        use_cache: bool = True,
     ):
-        self.model       = model
-        self.use_cache   = use_cache
-        self.max_workers = max_workers
+        self.model     = model
+        self.use_cache = use_cache
         self._verify_model()
 
     def _verify_model(self):
+        """Check which models are available via direct Ollama (for fallback info only)."""
         try:
-            import ollama
-            resp = ollama.list()
-            available = (
-                [m.model for m in resp.models]
-                if hasattr(resp, "models")
-                else [m.get("name", m.get("model", "")) for m in resp.get("models", [])]
-            )
-            logger.info("Ollama available models: %s", available)
+            r = requests.get(f"{_DIRECT_URL}/api/tags", timeout=5)
+            r.raise_for_status()
+            raw = r.json().get("models", [])
+            available = [
+                m.get("name", m.get("model", "")) for m in raw
+            ]
+            logger.info("Ollama models available: %s", available)
             if self.model not in available:
                 if FALLBACK_MODEL in available:
                     logger.warning(
-                        "Model %s not found — using %s. "
-                        "Pull with: ollama pull %s",
+                        "Model %s not found — using %s. Pull: ollama pull %s",
                         self.model, FALLBACK_MODEL, self.model,
                     )
                     self.model = FALLBACK_MODEL
+                elif available:
+                    self.model = available[0]
+                    logger.warning("Using first available model: %s", self.model)
                 else:
-                    logger.warning(
-                        "Neither %s nor %s found. Run: ollama pull %s",
-                        self.model, FALLBACK_MODEL, self.model,
-                    )
+                    logger.error("No Ollama models available.")
             else:
                 logger.info("Using model: %s", self.model)
         except Exception as e:
-            logger.warning("Could not verify Ollama models: %s — will attempt anyway.", e)
+            logger.warning("Could not verify Ollama models: %s", e)
+
+    def _call_ollama(self, prompt: str) -> str:
+        """
+        Call LLM via AI Orchestrator if running, else direct Ollama.
+        Orchestrator uses the 8B model with priority routing.
+        Direct Ollama fallback uses the configured model.
+        """
+        if _USE_ORCHESTRATOR:
+            # Route through orchestrator /trading/analyze
+            payload = {"prompt": prompt, "max_tokens": 512}
+            r = requests.post(
+                f"{_ORCHESTRATOR_URL}/trading/analyze",
+                headers=_TRADING_HEADERS,
+                json=payload,
+                timeout=60,
+            )
+            r.raise_for_status()
+            return r.json()["result"].get("response", "")
+        else:
+            # Direct Ollama fallback
+            payload = {
+                "model":    self.model,
+                "messages": [{"role": "user", "content": prompt}],
+                "stream":   False,
+            }
+            r = requests.post(
+                f"{_DIRECT_URL}/api/chat",
+                headers=_TRADING_HEADERS,
+                json=payload,
+                timeout=60,
+            )
+            r.raise_for_status()
+            return r.json()["message"]["content"]
 
     def analyze_headline(
         self,
         headline:  str,
-        symbol:    str              = "SPY",
+        symbol:    str               = "SPY",
         timestamp: Optional[datetime] = None,
     ) -> Optional[SentimentSignal]:
-        """
-        Analyze a single headline.
-        The GPU scheduler lock is held for the full Ollama call duration.
-        With qwen3:8b this is typically 2-5 seconds.
-        """
-        import ollama
-
+        """Analyze a single headline. Returns None on error."""
         if timestamp is None:
             timestamp = datetime.now(timezone.utc)
 
-        # Cache check — no GPU needed for cache hits
+        # Cache check — no GPU needed
         if self.use_cache:
             cached = cache.get(f"{headline}:{symbol}", self.model)
             if cached:
@@ -148,19 +197,13 @@ class NewsFlowAnalyzer:
         )
 
         try:
-            # Hold the lock for the full inference call.
-            # With qwen3:8b on full GPU, 30s is more than enough.
             with gpu_scheduler.analysis_inference(timeout=30.0) as available:
                 if not available:
                     logger.debug("Skipping headline — GPU busy: %.50s", headline)
                     return None
 
-                response = ollama.chat(
-                    model    = self.model,
-                    messages = [{"role": "user", "content": prompt}],
-                )
-                content = response["message"]["content"]
-                logger.debug("Raw LLM response (200 chars): %.200s", content)
+                content = self._call_ollama(prompt)
+                logger.debug("LLM response (200 chars): %.200s", content)
 
                 if self.use_cache:
                     cache.set(f"{headline}:{symbol}", self.model, content)
@@ -213,14 +256,13 @@ class NewsFlowAnalyzer:
         headlines: List[str],
         symbol:    str = "SPY",
     ) -> pd.DataFrame:
-        """
-        Analyze headlines sequentially.
-        With qwen3:8b on full GPU a 20-headline batch takes ~1-2 minutes
-        instead of 10-15 minutes with the 30B model.
-        """
-        logger.info("Batch analyzing %d headlines for %s...", len(headlines), symbol)
+        """Analyze headlines sequentially with trading priority routing."""
+        logger.info(
+            "Batch analyzing %d headlines for %s (via %s)...",
+            len(headlines), symbol,
+            "orchestrator" if _USE_ORCHESTRATOR else "direct Ollama",
+        )
         results = []
-
         for h in headlines:
             try:
                 sig = self.analyze_headline(h, symbol)
@@ -233,11 +275,7 @@ class NewsFlowAnalyzer:
         return pd.DataFrame(results) if results else pd.DataFrame()
 
     def get_aggregated_sentiment(self, df: pd.DataFrame) -> dict:
-        """
-        Compute weighted aggregate sentiment.
-        Returns neutral if fewer than MIN_ANALYZED_FOR_SIGNAL headlines
-        were successfully processed, preventing single-headline bias.
-        """
+        """Compute weighted aggregate. Returns neutral if too few analyzed."""
         NEUTRAL = {
             "overall_sentiment": "neutral",
             "sentiment_score":   0.0,
@@ -250,8 +288,7 @@ class NewsFlowAnalyzer:
         if df.empty or len(df) < MIN_ANALYZED_FOR_SIGNAL:
             if not df.empty:
                 logger.warning(
-                    "Only %d headline(s) analyzed — below minimum %d. "
-                    "Returning neutral to avoid single-headline bias.",
+                    "Only %d headline(s) analyzed (min %d) — returning neutral.",
                     len(df), MIN_ANALYZED_FOR_SIGNAL,
                 )
             return NEUTRAL

@@ -23,9 +23,11 @@ import joblib
 import numpy as np
 import pandas as pd
 
-from sklearn.ensemble import RandomForestClassifier
+from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier, VotingClassifier
 from sklearn.model_selection import train_test_split
-from sklearn.metrics import accuracy_score
+from sklearn.metrics import accuracy_score, f1_score
+from sklearn.preprocessing import RobustScaler
+from sklearn.pipeline import Pipeline
 
 try:
     import torch
@@ -166,22 +168,46 @@ class Trainer:
             X, y, test_size=0.2, shuffle=False
         )
 
-        model = RandomForestClassifier(
+        # Ensemble of RF + GBT — RF handles noise well, GBT catches
+        # nonlinear regime shifts. Voting averages their probability
+        # estimates so neither dominates.
+        rf = RandomForestClassifier(
             n_estimators=300,
             n_jobs=-1,
-            max_depth=6,          # shallower = less overfit on financial noise
-            min_samples_leaf=20,  # require meaningful support before splitting
+            max_depth=6,
+            min_samples_leaf=20,
             max_features="sqrt",
-            class_weight="balanced",  # handle imbalanced up/down classes
+            class_weight="balanced",
             random_state=42,
         )
-        model.fit(X_train, y_train)
-        preds = model.predict(X_test)
+        gbt = GradientBoostingClassifier(
+            n_estimators=200,
+            max_depth=4,
+            learning_rate=0.05,
+            subsample=0.8,
+            min_samples_leaf=20,
+            random_state=42,
+        )
+        model = VotingClassifier(
+            estimators=[("rf", rf), ("gbt", gbt)],
+            voting="soft",   # average probabilities, not hard votes
+            n_jobs=-1,
+        )
+
+        # RobustScaler handles outliers from gap opens and news spikes
+        pipeline = Pipeline([
+            ("scaler", RobustScaler()),
+            ("clf",    model),
+        ])
+        pipeline.fit(X_train, y_train)
+        preds = pipeline.predict(X_test)
 
         acc = accuracy_score(y_test, preds)
-        logger.info(f"RF model accuracy: {acc:.4f}")
+        f1  = f1_score(y_test, preds, average="weighted", zero_division=0)
+        logger.info(f"Ensemble model  accuracy={acc:.4f}  f1={f1:.4f}  "
+                    f"train={len(X_train)}  test={len(X_test)}")
 
-        return model, acc
+        return pipeline, acc
 
     # ----------------------------------------------------------
     # LSTM TRAINING

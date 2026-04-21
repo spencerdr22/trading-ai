@@ -161,7 +161,39 @@ signal.signal(signal.SIGINT,  handle_shutdown)
 signal.signal(signal.SIGTERM, handle_shutdown)
 
 
+# ── Single-instance lock ──────────────────────────────────────────────────────
+LOCK_FILE = os.path.join(PROJECT_ROOT, "data", ".scheduler.lock")
+
+def _acquire_lock():
+    """Prevent two scheduler instances running simultaneously."""
+    os.makedirs(os.path.dirname(LOCK_FILE), exist_ok=True)
+    if os.path.exists(LOCK_FILE):
+        try:
+            with open(LOCK_FILE) as f:
+                old_pid = int(f.read().strip())
+            # Check if that PID is still alive
+            import ctypes
+            handle = ctypes.windll.kernel32.OpenProcess(0x400, False, old_pid)
+            if handle:
+                ctypes.windll.kernel32.CloseHandle(handle)
+                log.warning(
+                    "Another scheduler is already running (pid=%d). Exiting.", old_pid
+                )
+                sys.exit(0)
+        except Exception:
+            pass  # stale lock — overwrite it
+    with open(LOCK_FILE, "w") as f:
+        f.write(str(os.getpid()))
+
+def _release_lock():
+    try:
+        os.remove(LOCK_FILE)
+    except Exception:
+        pass
+
+
 def main():
+    _acquire_lock()
     log.info("=" * 60)
     log.info("  MES Paper Trading Scheduler")
     log.info("  Symbol  : %s  (via SPY proxy on Alpaca paper)", SYMBOL)
@@ -172,29 +204,31 @@ def main():
     # Ensure data dir exists for log file
     os.makedirs(os.path.join(PROJECT_ROOT, "data"), exist_ok=True)
 
-    wait_for_market_open()
+    try:
+        wait_for_market_open()
+        proc = start_forward_mode()
 
-    proc = start_forward_mode()
+        # Monitor until stop time or process exits
+        while True:
+            current_time = now_et().time()
 
-    # Monitor until stop time or process exits
-    while True:
-        current_time = now_et().time()
+            if current_time >= STOP_TIME_ET:
+                log.info("%s ET -- closing time, stopping trading.",
+                         STOP_TIME_ET.strftime("%H:%M"))
+                stop_trading()
+                flatten_positions()
+                log.info("Session complete. Goodbye.")
+                break
 
-        # Check if past stop time
-        if current_time >= STOP_TIME_ET:
-            log.info("%s ET -- closing time, stopping trading.", STOP_TIME_ET.strftime("%H:%M"))
-            stop_trading()
-            flatten_positions()
-            log.info("Session complete. Goodbye.")
-            break
+            if proc.poll() is not None:
+                log.warning("Trading process exited early (code=%d).",
+                            proc.returncode)
+                flatten_positions()
+                break
 
-        # Check if subprocess died unexpectedly
-        if proc.poll() is not None:
-            log.warning("Trading process exited early (code=%d).", proc.returncode)
-            flatten_positions()
-            break
-
-        time.sleep(CHECK_INTERVAL)
+            time.sleep(CHECK_INTERVAL)
+    finally:
+        _release_lock()
 
 
 if __name__ == "__main__":

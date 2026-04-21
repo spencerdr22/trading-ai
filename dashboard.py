@@ -1,8 +1,12 @@
 # File: dashboard.py
 import streamlit as st
 import pandas as pd
+import sys
+import os
 from app.data.live_feed import get_latest_bar, get_last_n_bars
 from app.ml.model_manager import load_metrics_history, get_best_model
+
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../")))
 
 st.set_page_config(page_title="Trading AI Dashboard", layout="wide")
 

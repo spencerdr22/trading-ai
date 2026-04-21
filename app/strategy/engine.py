@@ -41,11 +41,11 @@ class StrategyEngine:
         classes   : label classes — default [-1, 0, 1]
     """
 
-    # Decision thresholds — only fire when model is genuinely confident
-    BUY_THRESHOLD  = 0.65   # raised from 0.60
-    SELL_THRESHOLD = 0.65   # raised from 0.60
-    MIN_MARGIN     = 0.12   # raised from 0.08 — require clear directional edge
-    STRONG_MARGIN  = 0.20   # above this = strong signal (logged for analysis)
+    # Decision thresholds
+    BUY_THRESHOLD  = 0.58   # was 0.65 — too restrictive, missed clear signals
+    SELL_THRESHOLD = 0.58   # was 0.65
+    MIN_MARGIN     = 0.08   # was 0.12 — 58/42 split is genuine edge
+    STRONG_MARGIN  = 0.25   # was 0.20 — reserve [STRONG] tag for high conviction
 
     def __init__(self, predictor, adaptor, cfg: dict, classes=None):
         self.predictor  = predictor
